@@ -1,0 +1,73 @@
+Teensy 3.6:
+ * ADC0 analog pins             * ADC1 analog pins              *
+ *   A0 (ADC0_SE5b)             *   A12 (ADC1_SE14)             *
+ *   A1 (ADC0_SE14)             *   A13 (ADC1_SE15)             *
+ *   A4 (ADC0_SE13)             *   A16 (ADC1_SE4b)             *
+ *   A5 (ADC0_SE12)             *   A17 (ADC1_SE5b)             *
+ *   A6 (ADC0_SE6b)             *   A18 (ADC1_SE6b)             *
+ *   A7 (ADC0_SE7b)             *   A19 (ADC1_SE7b)             *
+ *   A8 (ADC0_SE15)             *   A20 (ADC1_SE17)             *
+ *   A9 (ADC0_SE4b)             *   A22 (ADC1_SE23/DAC1_OUT)    *
+ *   A14 (ADC0_SE17)            *   A23 (ADC1_SE10)             *
+ *   A15 (ADC0_SE18)            *   A24 (ADC1_SE11)             *
+ *   A21 (ADC0_SE23/DAC0_OUT)   *                               *
+ *                                                              *
+ * ADC0 + ADC1 analog pins                                      *
+ *   A2 (ADC0_SE8/ADC1_SE8) Default Left/Mono input             *
+ *   A3 (ADC0_SE9/ADC1_SE9) Default Right input                 *
+ *   A10 (ADC1_DP0/ADC0_DP3)                                    *
+ *   A11 (ADC1_DM0/ADC0_DM3)
+
+
+2009 ZX-6R Gear Sensor
+=======================
+From https://www.youtube.com/watch?v=tQ7j3_xpnMo
+1st = 11.63   12.87 K ohm
+2nd = 10.33   11.44 K
+3rd =  9.7    10.74 K
+4th =  9.32   10.32 K
+5th =  9.06   10.03 K
+6th =  8.89    9.81 K
+N   = 0 ohm
+
+
+OUTPUT - RC3
+=============
+from http://www.racechrono.com/forum/discussion/1380/input-format-rc2-and-rc3-used-by-racedac-and-diy-loggers
+
+$RC3,[time],[count],[xacc],[yacc],[zacc],[gyrox],[gyroy],[gyroz],[rpm/d1],[d2],[a1],[a2],[a3],[a4],[a5],[a6],[a7],[a8],[a9],[a10],[a11],[a12],[a13],[a14],[a15]*checksum
+- time stamp is not used (empty). (for blended GPS support this should be a GPS synchronized realtime timestamp in NMEA 0183 format).
+- count is an overflowing line counter 0-65535. Can be left empty if GPS timestamp is provided.
+- acc fields: -1.000 = -1G, 1.000 = +1G
+- gyro fields: degrees per second, -1.000 = -1 deg/s, 1.000 = +1 deg/s
+- dx are digital channel fields, range -2000000.000 - 2000000.000
+- ax are analog channel fields, range -2000000.000 - 2000000.000
+- * is message separator character
+- NMEA 0183 type checksum, with two uppercase hexadecimal digits (one byte)
+- each line is terminated with CR plus LF
+
+- timestamp
+- count
+- [xacc],[yacc],[zacc],[gyrox],[gyroy],[gyroz]
+- rpm/d1 = rpm
+- d2 = front brake on/off
+- a1 = front brake pressure %
+- a2 = TPS %
+- a3 = front suspension %
+- a4 = rear suspension %
+- a5 = front wheel rpm
+- a6 = rear wheel rpm
+- a7 = gear
+- a8 = future
+- a9 = future
+- a10 = future
+- a11 = future - front tire temp
+- a12 = future - rear tire temp
+- a13 = roll degrees
+- a14 = pitch degrees
+- a15 = yaw degrees
+
+
+
+OUTPUT - VOB
+=============
