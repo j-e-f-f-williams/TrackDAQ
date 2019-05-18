@@ -71,3 +71,40 @@ $RC3,[time],[count],[xacc],[yacc],[zacc],[gyrox],[gyroy],[gyroz],[rpm/d1],[d2],[
 
 OUTPUT - VOB
 =============
+[header]
+	satellites
+	date
+	timestamp
+	latitude
+	longitude
+	velocity kmh
+	heading
+	altitude
+	device update rate
+	gps update rate
+	temperature C
+	pressure bar
+	x accelerometer g
+	y accelerometer g
+	z accelerometer g
+	x gyro degree/s
+	y gyro degree/s
+	z gyro degree/s
+	roll degrees
+	pitch degrees
+	yaw degrees
+	tps %
+	rpm
+	neutral
+	gear (count)
+	gear
+	front brake (on/off)
+	front brake pressure % 
+	front suspension %
+	front rpm 
+	rear suspension %
+	rear rpm 	
+	
+[column names]
+sats date time lat long velocity heading altitude device-update-rate gps-update-rate temperature pressure x-accelerometer y-accelerometer z-accelerometer x-gyro y-gyro z-gyro roll pitch yaw tps rpm neutral gear-count gear f-brake-switch f-brake-pressure f-suspension f-rpm r-suspension r-rpm 
+

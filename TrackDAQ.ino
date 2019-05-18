@@ -8,6 +8,11 @@
 #include "TimeLib.h"
 #include "SdFat.h"
 
+//TODO: investigate what happens when logging switch is triggered before GPS is locked
+
+
+const float _VERSION = 0.5;
+
 #if defined(USB_MTPDISK)
 #include "MTP.h"
 #endif
@@ -55,8 +60,9 @@ enum outputTypeSet { NONE, GPS, GPS_RC3, BINARY };
 static const enum outputTypeSet outputType = GPS_RC3;
 static const bool displayData = true;
 static const bool fileLogGPS = true;
-static const bool fileLogVOB = false;
-static const bool fileLogBIN = true;
+static const bool fileLogVBO = true;
+static const bool fileLogCSV = true;
+static const bool fileLogBIN = false;
 
 #define RPM_ENGINE_PIN     21  // Engine RPM
 #define RPM_FWHEEL_PIN     5 // Front Wheel RPM
@@ -88,7 +94,8 @@ SdFatSdioEX SD;
 #endif
 File fileGPS;
 File fileBIN;
-File fileVOB;
+File fileVBO;
+File fileCSV;
 
 
 ADC *adc = new ADC(); // adc object
@@ -114,6 +121,10 @@ DMAMEM static volatile uint16_t __attribute__((aligned(BUF_SIZE + 0))) adcbuffer
 TinyGPSPlus gps;
 
 TrackDAQ::BikeData bike = TrackDAQ::BikeData();
+unsigned long currentFlash;
+unsigned long lastFlash = millis();
+long loopCounter = 0;
+
 
 static const unsigned long BIN_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
 unsigned long currentBINSendTime;
@@ -123,11 +134,17 @@ static const unsigned long RC3_INTERVAL = 20; // in ms.  5 = 200hz  10 = 100hz  
 unsigned long currentRC3SendTime;
 unsigned long lastRC3SendTime = millis();
 char rc3Buffer[200];
+char vboBuffer[500];
+char csvBuffer[500];
 int rc3Counter = 0;
 
-static const unsigned long VOB_INTERVAL = 10; // in ms.  5 = 200hz  10 = 100hz
-unsigned long currentVOBSendTime;
-unsigned long lastVOBSendTime = millis();
+static const unsigned long VBO_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
+unsigned long currentVBOSendTime;
+unsigned long lastVBOSendTime = millis();
+
+static const unsigned long CSV_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
+unsigned long currentCSVSendTime;
+unsigned long lastCSVSendTime = millis();
 
 static const unsigned long DISPLAY_INTERVAL = 1000; // in ms.  1/s
 unsigned long currentDisplayTime;
@@ -136,9 +153,11 @@ unsigned long lastDisplayTime = millis();
 int itemsGPSPerSecond = 0;
 int itemsBINPerSecond = 0;
 int itemsRC3PerSecond = 0;
-int itemsVOBPerSecond = 0;
+int itemsVBOPerSecond = 0;
+int itemsCSVPerSecond = 0;
 
 bool rtcSet = false;
+int rtcCount = 0;
 bool loggingEnabled = false;
 
 char gpsLine[100];
@@ -147,6 +166,10 @@ int gpsCount = 0;
 
 void setup() {
   Serial.println("Setup - Start");
+  pinMode( INTERNAL_LED, OUTPUT);
+  pinMode( ENABLE_LED, OUTPUT);
+  digitalWrite( INTERNAL_LED, HIGH );
+  digitalWrite( ENABLE_LED, HIGH );
   // initialize the digital pin as an output.
   if( displayData )
     delay(10000);
@@ -195,14 +218,13 @@ void setup() {
 
   Serial.println("Setup - Enable Pins");
   pinMode( ENABLE_PIN, INPUT_PULLUP);
-  pinMode( INTERNAL_LED, OUTPUT);
-  pinMode( ENABLE_LED, OUTPUT);
 
   Serial.println("Setup - Start SD slot");
   SD.begin();
   
   Serial.println("\nSetup - End");
-
+  digitalWrite( INTERNAL_LED, LOW );
+  digitalWrite( ENABLE_LED, LOW );  
 }
 
 void loop() {
@@ -217,6 +239,14 @@ void loop() {
       loggingEnabled = false;
       digitalWrite( ENABLE_LED, LOW );
     }
+  }
+  currentFlash = millis();
+  if( !loggingEnabled && gps.satellites.value() > 3 && currentFlash - lastFlash >= 500 ) {
+	  lastFlash = currentFlash;
+	  if( digitalReadFast( ENABLE_LED ) )
+		  digitalWrite( ENABLE_LED, LOW );
+	  else
+		  digitalWrite( ENABLE_LED, HIGH );
   }
 
 #if defined(USB_MTPDISK)
@@ -249,11 +279,18 @@ void loop() {
     free(bin);
   }
 
-  if ( fileLogVOB && loggingEnabled && !fileVOB && rtcSet ) {
+  if ( fileLogVBO && loggingEnabled && !fileVBO && rtcSet ) {
+    String fileName = getFileName( "vbo" );
+    Serial.println( "Creating file " + fileName );
+    fileVBO.open( fileName.c_str(), O_RDWR | O_CREAT);
+    addVBOHeader();
+  }
+
+  if ( fileLogCSV && loggingEnabled && !fileCSV && rtcSet ) {
     String fileName = getFileName( "csv" );
     Serial.println( "Creating file " + fileName );
-    fileVOB.open( fileName.c_str(), O_RDWR | O_CREAT);
-    addVOBHeader();
+    fileCSV.open( fileName.c_str(), O_RDWR | O_CREAT);
+    addCSVHeader();
   }
 
 
@@ -265,9 +302,9 @@ void loop() {
     fileBIN.flush();
     fileBIN.close();
   }
-  if ( fileLogVOB && !loggingEnabled && fileVOB ) {
-    fileVOB.flush();
-    fileVOB.close();
+  if ( fileLogVBO && !loggingEnabled && fileVBO ) {
+    fileVBO.flush();
+    fileVBO.close();
   }
 
 
@@ -342,8 +379,10 @@ void loop() {
         gpsLine[gpsCount] = c;
         gpsCount ++;
         if ( c == '\n') {
-          itemsGPSPerSecond ++;
           gpsLine[ gpsCount ] = 0;
+          if( !strncmp( gpsLine, "$GPRMC", 6) ) {
+              itemsGPSPerSecond ++;
+          }
   
           if( outputType == GPS || outputType == GPS_RC3 ) {
             Serial2.print( gpsLine );
@@ -362,23 +401,26 @@ void loop() {
     }
   }
 
-  if ( !rtcSet && gps.time.isUpdated() && gps.time.age() < 1000 && gps.date.year() > 2000 ) {
-    Serial.print( "Setting time to: " );
-    Serial.print(  gps.date.year() );
-    Serial.print( "/" );
-    Serial.print( gps.date.month() );
-    Serial.print( "/" );
-    Serial.print( gps.date.day() );
-    Serial.print( " " );
-    Serial.print( gps.time.hour() );
-    Serial.print( ":" );
-    Serial.print( gps.time.minute() );
-    Serial.print( ":" );
-    Serial.println( gps.time.second() );
-
-    setTime( gps.time.hour(), gps.time.minute(), gps.time.second(), gps.date.day(), gps.date.month(), gps.date.year() );
-    adjustTime( -14400 );
-    rtcSet = true;
+  if ( !rtcSet && gps.location.age() < 1000 && gps.time.isUpdated() && gps.time.age() < 1000 && gps.date.year() > 2000 ) {
+    rtcCount++;
+    if( rtcCount > 10 ) { 
+      Serial.print( "Setting time to: " );
+      Serial.print(  gps.date.year() );
+      Serial.print( "/" );
+      Serial.print( gps.date.month() );
+      Serial.print( "/" );
+      Serial.print( gps.date.day() );
+      Serial.print( " " );
+      Serial.print( gps.time.hour() );
+      Serial.print( ":" );
+      Serial.print( gps.time.minute() );
+      Serial.print( ":" );
+      Serial.println( gps.time.second() );
+  
+      setTime( gps.time.hour(), gps.time.minute(), gps.time.second(), gps.date.day(), gps.date.month(), gps.date.year() );
+      adjustTime( -14400 );
+      rtcSet = true;
+    }
   }
 
 
@@ -393,6 +435,26 @@ void loop() {
       fileGPS.write( rc3Buffer);
       digitalWrite( INTERNAL_LED, LOW );
     }
+  }
+
+  currentVBOSendTime = millis();
+  if ( fileLogVBO && fileVBO  && currentVBOSendTime - lastVBOSendTime >= VBO_INTERVAL ) {
+	  lastVBOSendTime = currentVBOSendTime;
+	  itemsVBOPerSecond++;
+      digitalWrite( INTERNAL_LED, HIGH );
+      populateVBOLine();
+      fileVBO.println( vboBuffer );
+      digitalWrite( INTERNAL_LED, LOW );
+  }
+
+  currentCSVSendTime = millis();
+  if ( fileLogCSV && fileCSV  && currentCSVSendTime - lastCSVSendTime >= CSV_INTERVAL ) {
+	  lastCSVSendTime = currentCSVSendTime;
+	  itemsCSVPerSecond++;
+      digitalWrite( INTERNAL_LED, HIGH );
+      populateCSVLine();
+      fileCSV.println( csvBuffer );
+      digitalWrite( INTERNAL_LED, LOW );
   }
 
   
@@ -413,6 +475,8 @@ void loop() {
     free(bin);
     bike.dataSent();
   }
+
+  loopCounter ++;
 
   currentDisplayTime = millis();
   if (currentDisplayTime - lastDisplayTime >= DISPLAY_INTERVAL ) {
@@ -552,6 +616,9 @@ void refreshDisplay() {
   if ( !displayData ) {
     return;
   }
+  if( !loggingEnabled ) {
+    digitalWrite( INTERNAL_LED, HIGH );
+  }
   Serial.println("========================================================================================================================");
   Serial.print("Logging Enabled:\t");
   Serial.print( ( loggingEnabled ) ? "Yes" : "No" );
@@ -576,11 +643,19 @@ void refreshDisplay() {
   }
   Serial.println();
 
-  Serial.print("VOB File:\t\t");
-  Serial.print(fileVOB);
-  if ( fileVOB ) {
+  Serial.print("VBO File:\t\t");
+  Serial.print(fileVBO);
+  if ( fileVBO ) {
     char fileName[20];
-    fileVOB.getName( fileName, 20 );
+    fileVBO.getName( fileName, 20 );
+    Serial.print( "\t" );
+    Serial.print( fileName );
+  }
+  Serial.print("\tCSV File:\t\t");
+  Serial.print(fileCSV);
+  if ( fileGPS ) {
+    char fileName[20];
+    fileCSV.getName( fileName, 20 );
     Serial.print( "\t" );
     Serial.print( fileName );
   }
@@ -591,17 +666,35 @@ void refreshDisplay() {
 
   Serial.print("\nTPS:\t\t");
   Serial.print(bike.getTps());
+  Serial.print("(");
+  Serial.print(bike.getTpsRaw());
+  Serial.print(")");
   Serial.print("\tGear:\t\t");
   Serial.print(bike.getGearPercent());
+  Serial.print("(");
+  Serial.print(bike.getGearRaw());
+  Serial.print(")");
   Serial.print("\tBrake:\t\t");
   Serial.print(bike.getFBrakePressure());
+  Serial.print("(");
+  Serial.print(bike.getFBrakePressureRaw());
+  Serial.println(")");
 
   Serial.print("F Suspension:\t");
   Serial.print(bike.getFSuspension());
+  Serial.print("(");
+  Serial.print(bike.getFSuspensionRaw());
+  Serial.print(")");
   Serial.print("\tR Suspension:\t");
   Serial.print(bike.getRSuspension());
+  Serial.print("(");
+  Serial.print(bike.getRSuspensionRaw());
+  Serial.print(")");
   Serial.print("\tO2 Sensor:\t");
   Serial.println(bike.getO2Sensor());
+  Serial.print("(");
+  Serial.print(bike.getO2SensorRaw());
+  Serial.println(")");
 
   Serial.print("\nFront Brake:\t");
   Serial.print(bike.getFBrakeSwitch());
@@ -618,6 +711,14 @@ void refreshDisplay() {
   struct QuaternionData quaternions = bike.getQuaternion();
   struct AccelerometerData accelerometers = bike.getAccelerometer();
   struct GyroscopeData gyros = bike.getGyroscope();
+  struct PressureData pressure = bike.getPressure();
+
+  Serial.print("\nTemp:\t\t");
+  Serial.print(pressure.temperature);
+  Serial.print("\tPressure:\t\t");
+  Serial.print(pressure.pressure);
+  Serial.print("\tIMU Altitude:\t\t");
+  Serial.println(pressure.altitude);
 
   Serial.print("\nYaw:\t\t");
   Serial.print(quaternions.yaw);
@@ -641,11 +742,15 @@ void refreshDisplay() {
   Serial.print("\nGPS per second:\t");
   Serial.print(itemsGPSPerSecond);
   Serial.print("\tBIN per second:\t");
-  Serial.println(itemsBINPerSecond);
+  Serial.print(itemsBINPerSecond);
+  Serial.print("\tLOOP per second:\t");
+  Serial.println(loopCounter);
   Serial.print("RC3 per second:\t");
   Serial.print(itemsRC3PerSecond);
-  Serial.print("\tVOB per second:\t");
-  Serial.println(itemsVOBPerSecond);
+  Serial.print("\tVBO per second:\t");
+  Serial.print(itemsVBOPerSecond);
+  Serial.print("\tCSV per second:\t");
+  Serial.println(itemsCSVPerSecond);
   Serial.println();
 
   Serial.print("Date: ");
@@ -665,8 +770,13 @@ void refreshDisplay() {
   itemsGPSPerSecond = 0;
   itemsBINPerSecond = 0;
   itemsRC3PerSecond = 0;
-  itemsVOBPerSecond = 0;
+  itemsVBOPerSecond = 0;
+  itemsCSVPerSecond = 0;
+  loopCounter = 0;
   gpsdump();
+  if( !loggingEnabled ) {
+    digitalWrite( INTERNAL_LED, LOW );
+  }  
 }
 
 // simple function to scan for I2C devices on the bus
@@ -816,9 +926,78 @@ String getFileName( String ext ) {
   return String( fileName );
 }
 
-void addVOBHeader( void ) {
+void addCSVHeader( void ) {
+	char tempStr[100];
+	if( fileVBO ) {
+		sprintf( tempStr, "File created on %02d/%02d/%04d at %02d:%02d:%02d", day(), month(), year(), hour(), minute(), second() );
+		fileVBO.println( tempStr );
+		fileVBO.println("sats,date,time,lat,long,velocity,heading,altitude,device-update-rate,gps-update-rate,temperature,pressure,x-accelerometer,y-accelerometer,z-accelerometer,x-gyro,y-gyro,z-gyro,roll,pitch,yaw,tps,rpm,neutral,gear-count,gear,f-brake-switch,f-brake-pressure,f-suspension,f-rpm,r-suspension,r-rpm");
+	}
+}
 
+void addVBOHeader( void ) {
+	char tempStr[100];
+	if( fileVBO ) {
+		sprintf( tempStr, "File created on %02d/%02d/%04d at %02d:%02d:%02d", day(), month(), year(), hour(), minute(), second() );
+		fileVBO.println( tempStr );
+		fileVBO.println("\n[header]");
+		fileVBO.println("satellites");
+		fileVBO.println("date");
+		fileVBO.println("timestamp");
+		fileVBO.println("latitude");
+		fileVBO.println("longitude");
+		fileVBO.println("velocity kmh");
+		fileVBO.println("heading degrees");
+		fileVBO.println("altitude m");
+		fileVBO.println("device update rate");
+		fileVBO.println("gps update rate");
+		fileVBO.println("temperature C");
+		fileVBO.println("pressure bar");
+		fileVBO.println("x accelerometer g");
+		fileVBO.println("y accelerometer g");
+		fileVBO.println("z accelerometer g");
+		fileVBO.println("x gyro degree/s");
+		fileVBO.println("y gyro degree/s");
+		fileVBO.println("z gyro degree/s");
+		fileVBO.println("roll degrees");
+		fileVBO.println("pitch degrees");
+		fileVBO.println("yaw degrees");
+		fileVBO.println("tps %");
+		fileVBO.println("rpm");
+		fileVBO.println("neutral");
+		fileVBO.println("gear (count)");
+		fileVBO.println("gear");
+		fileVBO.println("front brake (on/off)");
+		fileVBO.println("front brake pressure %");
+		fileVBO.println("front suspension %");
+		fileVBO.println("front rpm");
+		fileVBO.println("rear suspension %");
+		fileVBO.println("rear rpm");
+		fileVBO.println("\n[comments]");
+		sprintf( tempStr, "Generated by TrackDAQ v%0.02f", _VERSION );
+		fileVBO.println( tempStr );
+		fileVBO.println("\n[column names]");
+		fileVBO.println("sats date time lat long velocity heading altitude device-update-rate gps-update-rate temperature pressure x-accelerometer y-accelerometer z-accelerometer x-gyro y-gyro z-gyro roll pitch yaw tps rpm neutral gear-count gear f-brake-switch f-brake-pressure f-suspension f-rpm r-suspension r-rpm");
+		fileVBO.println("\n[data]");
+	}
+}
 
+void populateCSVLine() {
+	struct QuaternionData quaternions = bike.getQuaternion();
+	struct AccelerometerData accelerometers = bike.getAccelerometer();
+	struct GyroscopeData gyros = bike.getGyroscope();
+	struct PressureData pressure = bike.getPressure();
+
+	sprintf( vboBuffer, "%02lu,%02d%02d%04d,%02d%02d%02d.%03lu,%f,%f,%03.02f,%03.02f,%04.02f,%03d,%03d,%03.02f,%04.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%05f,%d,%d,%d,%d,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f",  gps.satellites.value(),day(), month(), year(), hour(), minute(), gps.time.second(), ((gps.time.centisecond()*10) + gps.time.age()), gps.location.lat(), gps.location.lng(), gps.speed.kmph(), gps.course.deg(), gps.altitude.meters(), itemsVBOPerSecond, itemsGPSPerSecond, pressure.temperature, pressure.pressure, accelerometers.ax, accelerometers.ay, accelerometers.az, gyros.gx, gyros.gy, gyros.gz, quaternions.roll, quaternions.pitch, quaternions.yaw, bike.getTps(), bike.getEngineSpeed(), (bike.getNeutralSwitch() ? 1:0), bike.getGearRaw(), bike.getGearNumber(), (bike.getFBrakeSwitch()?1:0), bike.getFBrakePressure(), bike.getFSuspension(), bike.getFWheelSpeed(), bike.getRSuspension(), bike.getRWheelSpeed() );
+}
+
+void populateVBOLine() {
+	struct QuaternionData quaternions = bike.getQuaternion();
+	struct AccelerometerData accelerometers = bike.getAccelerometer();
+	struct GyroscopeData gyros = bike.getGyroscope();
+	struct PressureData pressure = bike.getPressure();
+
+	sprintf( vboBuffer, "%02lu %02d%02d%04d %02d%02d%02d.%03lu %f %f %03.02f %03.02f %04.02f %03d %03d %03.02f %04.02f %03.02f %03.02f %03.02f %03.02f %03.02f %03.02f %03.02f %03.02f %03.02f %03.02f %05f %d %d %d %d %03.02f %03.02f %03.02f %03.02f %03.02f",  gps.satellites.value(),day(), month(), year(), hour(), minute(), gps.time.second(), ((gps.time.centisecond()*10) + gps.time.age()), gps.location.lat(), gps.location.lng(), gps.speed.kmph(), gps.course.deg(), gps.altitude.meters(), itemsVBOPerSecond, itemsGPSPerSecond, pressure.temperature, pressure.pressure, accelerometers.ax, accelerometers.ay, accelerometers.az, gyros.gx, gyros.gy, gyros.gz, quaternions.roll, quaternions.pitch, quaternions.yaw, bike.getTps(), bike.getEngineSpeed(), (bike.getNeutralSwitch() ? 1:0), bike.getGearRaw(), bike.getGearNumber(), (bike.getFBrakeSwitch()?1:0), bike.getFBrakePressure(), bike.getFSuspension(), bike.getFWheelSpeed(), bike.getRSuspension(), bike.getRWheelSpeed() );
 }
 
 void populateRC3Buffer( ) {
@@ -829,7 +1008,7 @@ void populateRC3Buffer( ) {
 
 //  sprintf(bufffer, "RC3,%02d%02d%02d.%03d,%i", gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond()*10) + gps.time.age(), rc3Counter );
   sprintf(bufffer,
-            "RC3,%02d%02d%02d.%03u,%i,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%05.0f,%i,%03.2f,%03.2f,%03.2f,%03.0f,%03.0f,%03.2f,0,0,0,0,0,0,%01.2f,%01.2f,%01.2f",
+            "RC3,%02d%02d%02d.%03lu,%i,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%05.0f,%i,%03.2f,%03.2f,%03.2f,%03.0f,%03.0f,%03.2f,0,0,0,0,0,0,%01.2f,%01.2f,%01.2f",
             gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond()*10) + gps.time.age(), rc3Counter,
             bike.getAccelerometer().ax, bike.getAccelerometer().ay, bike.getAccelerometer().az,
             bike.getGyroscope().gx, bike.getGyroscope().gy, bike.getGyroscope().gz,

@@ -9,8 +9,8 @@
 #ifndef BIKEDATA_H_
 #define BIKEDATA_H_
 
-#define DAQ_VERSION		1
-#define	BOOT_VERSION	1
+#define BIKE_VERSION	1.0
+#define	BOOT_VERSION	1.0
 #define SERIAL_NUMBER	000001
 
 #define MAX_VOLTAGE		5
@@ -126,18 +126,23 @@ public:
 	struct PressureData getPressure( void );
 
 	float getTps( void );
+	uint16_t getTpsRaw( void );
 	void setTps( uint16_t );
 	int getGearNumber( void );
 	float getGearPercent( void );
 	uint16_t getGearRaw( void );
 	void setGear( uint16_t );
 	float getFSuspension( void );
+	uint16_t getFSuspensionRaw( void );
 	void setFSuspension( uint16_t );
 	float getRSuspension( void );
+	uint16_t getRSuspensionRaw( void );
 	void setRSuspension( uint16_t );
 	float getFBrakePressure( void );
+	uint16_t getFBrakePressureRaw( void );
 	void setFBrakePressure( uint16_t );
 	float getO2Sensor( void );
+	uint16_t getO2SensorRaw( void );
 	void setO2Sensor( uint16_t );
 
 	float getFWheelSpeed( void );
