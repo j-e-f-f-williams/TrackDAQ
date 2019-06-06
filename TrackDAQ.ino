@@ -61,7 +61,7 @@ static const enum outputTypeSet outputType = GPS_RC3;
 static const bool displayData = true;
 static const bool fileLogGPS = false;
 static const bool fileLogVBO = true;
-static const bool fileLogCSV = false;
+static const bool fileLogCSV = true;
 static const bool fileLogBIN = false;
 
 #define RPM_ENGINE_PIN     21  // Engine RPM
@@ -165,22 +165,22 @@ int gpsCount = 0;
 
 
 void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  Serial2.begin(115200);
+
+  if( displayData )
+      delay(10000);
+    else
+      delay(5000);
+
   Serial.println("Setup - Start");
   pinMode( INTERNAL_LED, OUTPUT);
   pinMode( ENABLE_LED, OUTPUT);
   digitalWrite( INTERNAL_LED, HIGH );
   digitalWrite( ENABLE_LED, HIGH );
-  // initialize the digital pin as an output.
-  if( displayData )
-    delay(10000);
-  else
-    delay(2000);
-  Serial.begin(115200);
-  Serial1.begin(115200);
-  Serial2.begin(115200);
 
   Serial.println("Setup - Clear buffers");
-
   memset(gpsLine, 0, sizeof(gpsLine));
 
   // clear buffer
@@ -223,6 +223,7 @@ void setup() {
 
   Serial.println("Setup - Start SD slot");
   SD.begin();
+  SD.chvol();
   
   Serial.println("\nSetup - End");
   digitalWrite( INTERNAL_LED, LOW );
@@ -308,6 +309,11 @@ void loop() {
     fileVBO.flush();
     fileVBO.close();
   }
+  if ( fileLogCSV && !loggingEnabled && fileCSV ) {
+	fileCSV.flush();
+	fileCSV.close();
+  }
+
 
 
   if (freq0.available()) {
@@ -486,7 +492,6 @@ void loop() {
     refreshDisplay();
   }
 
-  //delay(1);
 }
 
 void setup_dma() {
@@ -616,51 +621,40 @@ void digitalPinISR1(void) {
 
 void refreshDisplay() {
   if ( !displayData ) {
+	  Serial.print("Date: ");
+	  Serial.print(month());
+	  Serial.print("/");
+	  Serial.print(day());
+	  Serial.print("/");
+	  Serial.print(year());
+	  Serial.print("  Time: ");
+	  Serial.print(hour() );
+	  Serial.print(":");
+	  Serial.print(minute());
+	  Serial.print(":");
+	  Serial.println(second());
     return;
   }
   if( !loggingEnabled ) {
     digitalWrite( INTERNAL_LED, HIGH );
   }
+
   Serial.println("========================================================================================================================");
   Serial.print("Logging Enabled:\t");
   Serial.print( ( loggingEnabled ) ? "Yes" : "No" );
   Serial.print("\tRTC Set:\t\t");
   Serial.println( ( rtcSet ) ? "Yes" : "No" );
 
-  Serial.print("\nGPS File:\t\t");
-  Serial.print(fileGPS);
-  if ( fileGPS ) {
-    char fileName[20];
-    fileGPS.getName( fileName, 20 );
-    Serial.print( "\t" );
-    Serial.print( fileName );
-  }
-  Serial.print("\tRUN File:\t\t");
-  Serial.print(fileBIN);
-  if ( fileGPS ) {
-    char fileName[20];
-    fileBIN.getName( fileName, 20 );
-    Serial.print( "\t" );
-    Serial.print( fileName );
-  }
+  Serial.print("\nGPS Logging:\t\t");
+  Serial.print( (fileGPS ) ? "True" : "False" );
+  Serial.print("\tRUN Logging:\t\t");
+  Serial.print( (fileBIN ) ? "True" : "False" );
   Serial.println();
 
-  Serial.print("VBO File:\t\t");
-  Serial.print(fileVBO);
-  if ( fileVBO ) {
-    char fileName[20];
-    fileVBO.getName( fileName, 20 );
-    Serial.print( "\t" );
-    Serial.print( fileName );
-  }
-  Serial.print("\tCSV File:\t\t");
-  Serial.print(fileCSV);
-  if ( fileGPS ) {
-    char fileName[20];
-    fileCSV.getName( fileName, 20 );
-    Serial.print( "\t" );
-    Serial.print( fileName );
-  }
+  Serial.print("VBO Logging:\t\t");
+  Serial.print( (fileVBO ) ? "True" : "False" );
+  Serial.print("\tCSV Logging:\t\t");
+  Serial.print( (fileCSV ) ? "True" : "False" );
   Serial.println();
 
   Serial.print("\nMax ADC:\t\t");
@@ -930,10 +924,40 @@ String getFileName( String ext ) {
 
 void addCSVHeader( void ) {
 	char tempStr[100];
-	if( fileVBO ) {
+	if( fileCSV ) {
 		sprintf( tempStr, "File created on %02d/%02d/%04d at %02d:%02d:%02d", day(), month(), year(), hour(), minute(), second() );
-		fileVBO.println( tempStr );
-		fileVBO.println("sats,date,time,lat,long,velocity,heading,altitude,device-update-rate,gps-update-rate,temperature,pressure,x-accelerometer,y-accelerometer,z-accelerometer,x-gyro,y-gyro,z-gyro,roll,pitch,yaw,tps,rpm,neutral,gear-count,gear,f-brake-switch,f-brake-pressure,f-suspension,f-rpm,r-suspension,r-rpm");
+		fileCSV.println( tempStr );
+		fileCSV.println("sats,"
+		"date,"
+		"time,"
+		"lat,"
+		"long,"
+		"velocity,"
+		"heading,"
+		"altitude,"
+		"temperature,"
+		"pressure,"
+		"x-accelerometer,"
+		"y-accelerometer,"
+		"z-accelerometer,"
+		"x-gyro,"
+		"y-gyro,"
+		"z-gyro,"
+		"roll,"
+		"pitch,"
+		"yaw,"
+		"tps,"
+		"rpm,"
+		"neutral,"
+		"gear-count,"
+		"gear,"
+		"f-brake-switch,"
+		"f-brake-pressure,"
+		"f-suspension,"
+		"f-rpm,"
+		"r-suspension,"
+		"r-rpm"
+		);
 	}
 }
 
@@ -1004,7 +1028,68 @@ void populateCSVLine() {
 	struct GyroscopeData gyros = bike.getGyroscope();
 	struct PressureData pressure = bike.getPressure();
 
-	sprintf( vboBuffer, "%02lu,%02d%02d%04d,%02d%02d%02d.%03lu,%f,%f,%03.02f,%03.02f,%04.02f,%03d,%03d,%03.02f,%04.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f,%05f,%d,%d,%d,%d,%03.02f,%03.02f,%03.02f,%03.02f,%03.02f",  gps.satellites.value(),day(), month(), year(), hour(), minute(), gps.time.second(), ((gps.time.centisecond()*10) + gps.time.age()), gps.location.lat(), gps.location.lng(), gps.speed.kmph(), gps.course.deg(), gps.altitude.meters(), itemsVBOPerSecond, itemsGPSPerSecond, pressure.temperature, pressure.pressure, accelerometers.ax, accelerometers.ay, accelerometers.az, gyros.gx, gyros.gy, gyros.gz, quaternions.roll, quaternions.pitch, quaternions.yaw, bike.getTps(), bike.getEngineSpeed(), (bike.getNeutralSwitch() ? 1:0), bike.getGearRaw(), bike.getGearNumber(), (bike.getFBrakeSwitch()?1:0), bike.getFBrakePressure(), bike.getFSuspension(), bike.getFWheelSpeed(), bike.getRSuspension(), bike.getRWheelSpeed() );
+	sprintf( csvBuffer,
+	"%02lu,"				// satelites
+	"%02d%02d%04d,"			// date
+	"%02d%02d%02d.%03lu,"	// time
+	"%f,"					// lat
+	"%f,"					// lon
+	"%03.02f,"				// speed
+	"%03.02f,"				// direction
+	"%04.02f,"				// altitude
+	"%03.02f,"				// temp
+	"%04.02f,"				// pressure
+	"%03.02f,"				// accelerometer x
+	"%03.02f,"				// accelerometer y
+	"%03.02f,"				// accelerometer z
+	"%03.02f,"				// gyro x
+	"%03.02f,"				// gyro y
+	"%03.02f,"				// gyro z
+	"%03.02f,"				// roll
+	"%03.02f,"				// pitch
+	"%03.02f,"				// yaw
+	"%03.02f,"				// TPS
+	"%05f,"					// RPM
+	"%d,"					// Neutral
+	"%d,"					// Gear V
+	"%d,"					// Gear Number
+	"%d,"					// F Brake on/off
+	"%03.02f,"				// Brake pressure
+	"%03.02f,"				// F Suspension
+	"%03.02f,"				// F Wheel Speed
+	"%03.02f,"				// R Suspension
+	"%03.02f",  			// R Wheel Speed
+	gps.satellites.value(),
+	day(), month(), year(), 
+	hour(), minute(), gps.time.second(), ((gps.time.centisecond()*10) + gps.time.age()), 
+	gps.location.lat(), 
+	gps.location.lng(), 
+	gps.speed.kmph(), 
+	gps.course.deg(), 
+	gps.altitude.meters(), 
+	pressure.temperature, 
+	pressure.pressure, 
+	accelerometers.ax, 
+	accelerometers.ay, 
+	accelerometers.az, 
+	gyros.gx, 
+	gyros.gy, 
+	gyros.gz, 
+	quaternions.roll, 
+	quaternions.pitch, 
+	quaternions.yaw, 
+	bike.getTps(), 
+	bike.getEngineSpeed(), 
+	(bike.getNeutralSwitch() ? 1:0), 
+	bike.getGearRaw(), 
+	bike.getGearNumber(), 
+	(bike.getFBrakeSwitch()?1:0), 
+	bike.getFBrakePressure(), 
+	bike.getFSuspension(), 
+	bike.getFWheelSpeed(), 
+	bike.getRSuspension(), 
+	bike.getRWheelSpeed() 
+	);
 }
 
 void populateVBOLine() {
@@ -1068,7 +1153,7 @@ void populateVBOLine() {
 	gps.altitude.meters(),		// height
 	0.0, 						// long accel g
 	0.0, 						// lat accel g
-	itemsVBOPerSecond,			// device-update-rate
+	int( 1000.0 / VBO_INTERVAL ),			// device-update-rate
 	quaternions.roll,			// lean-angle
 	1,							// fix-type
 	gps.hdop.hdop(), 			// coordinate-precision
@@ -1088,7 +1173,7 @@ void populateVBOLine() {
 	gyros.gx,					// x-rotation-datalogger
 	gyros.gy,					// y-rotation-datalogger
 	gyros.gz,					// z-rotation-datalogger
-	itemsVBOPerSecond,			// device-update-rate-datalogger
+	int( 1000.0 / VBO_INTERVAL ),			// device-update-rate-datalogger
 	bike.getEngineSpeed(),		// rpm-datalogger
 	quaternions.roll,			// roll-datalogger
 	quaternions.pitch,			// pitch-datalogger
@@ -1115,61 +1200,58 @@ void populateRC3Buffer( ) {
     rc3Counter = 0;   
   // $RC3,[time],[count],[xacc],[yacc],[zacc],[gyrox],[gyroy],[gyroz],rpm,front brake,front brake pressure,TPS,Front Suspension,Rear Suspension,Front Wheel RPM,Rear Wheel RPM,Gear,[a8],[a9],[a10],[a11],[a12],Roll,Pitch,Yaw*checksum
 
-//  sprintf(bufffer, "RC3,%02d%02d%02d.%03d,%i", gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond()*10) + gps.time.age(), rc3Counter );
-  sprintf(bufffer,
-            "RC3,%02d%02d%02d.%03lu,%i,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%+01.2f,%05.0f,%i,%03.2f,%03.2f,%03.2f,%03.0f,%03.0f,%03.2f,0,0,0,0,0,0,%01.2f,%01.2f,%01.2f",
-            gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond()*10) + gps.time.age(), rc3Counter,
-            bike.getAccelerometer().ax, bike.getAccelerometer().ay, bike.getAccelerometer().az,
-            bike.getGyroscope().gx, bike.getGyroscope().gy, bike.getGyroscope().gz,
-            bike.getEngineSpeed(), (bike.getFBrakeSwitch()) ? 1 : 0, bike.getTps(),
-            bike.getFSuspension(), bike.getRSuspension(), bike.getFWheelSpeed(), bike.getRWheelSpeed(),bike.getGearPercent(),
-            bike.getQuaternion().roll,bike.getQuaternion().pitch, bike.getQuaternion().yaw);
+	struct QuaternionData quaternions = bike.getQuaternion();
+	struct AccelerometerData accelerometers = bike.getAccelerometer();
+	struct GyroscopeData gyros = bike.getGyroscope();
+	struct PressureData pressure = bike.getPressure();
 
-// below is experiment if my own conversion functions are faster than sprintf
-//  strcpy( bufffer, "RC3," );
-//  strcat( bufffer, itoa( gps.time.hour(), 2 ) );
-//  strcat( bufffer, itoa( gps.time.minute(), 2 ) );
-//  strcat( bufffer, itoa( gps.time.second(), 2 ) );
-//  strcat( bufffer, "." );
-//  strcat( bufffer, itoa( (gps.time.centisecond()*10) + gps.time.age(), 3 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, itoa( rc3Counter, 0 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getAccelerometer().ax, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getAccelerometer().ay, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getAccelerometer().az, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getGyroscope().gx, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getGyroscope().gy, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getGyroscope().gz, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, itoa(bike.getEngineSpeed(), 5 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, itoa(bike.getFBrakeSwitch(), 0 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getFBrakePressure(), 3, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getTps(), 3, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getFSuspension(), 3, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getRSuspension(), 3, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, itoa(bike.getFWheelSpeed(), 0 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, itoa(bike.getRWheelSpeed(), 0 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getGearPercent(), 3, 2 ) );
-//  strcat( bufffer, ",0,0,0,0,0," );
-//  strcat( bufffer, ftoa( bike.getQuaternion().roll, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getQuaternion().pitch, 1, 2 ) );
-//  strcat( bufffer, "," );
-//  strcat( bufffer, ftoa( bike.getQuaternion().yaw, 1, 2 ) );
+  sprintf(bufffer,		  
+            "RC3,"					// $RC3
+			"%02d%02d%02d.%03lu,"	// [time]
+			"%i,"					// [count]
+			"%+01.2f,"				// [xacc]
+			"%+01.2f,"				// [yacc]
+			"%+01.2f,"				// [zacc]
+			"%+01.2f,"				// [gyrox]
+			"%+01.2f,"				// [gyroy]
+			"%+01.2f,"				// [gyroz]
+			"%05.0f,"				// rpm
+			"%i,"					// front brake
+			"%03.2f,"				// front brake pressure
+			"%03.2f,"				// TPS
+			"%03.2f,"				// Front Suspension
+			"%03.0f,"				// Rear Suspension
+			"%03.0f,"				// Front Wheel RPM
+			"%03.2f,"				// Rear Wheel RPM
+			"0,"					// Gear
+			"0,"					// [a8]
+			"0,"					// [a9]
+			"0,"					// [a10]
+			"0,"					// [a11]
+			"0,"					// [a12]
+			"%01.2f,"				// Roll
+			"%01.2f,"				// Pitch
+			"%01.2f",				// Yaw
+            gps.time.hour(),gps.time.minute(),gps.time.second(), (gps.time.centisecond()*10) + gps.time.age(),
+			rc3Counter,
+            accelerometers.ax,
+			accelerometers.ay,
+			accelerometers.az,
+            gyros.gx,
+			gyros.gy,
+			gyros.gz,
+            bike.getEngineSpeed(),
+			(bike.getFBrakeSwitch()) ? 1 : 0,
+			bike.getTps(),
+			bike.getFSuspension(),
+			bike.getRSuspension(),
+			bike.getFWheelSpeed(),
+			bike.getRWheelSpeed(),
+			bike.getGearPercent(),
+            quaternions.roll,
+			quaternions.pitch,
+			quaternions.yaw
+			);
   
   char crc = getRC3CheckSum(bufffer); 
   sprintf(rc3Buffer, "$%s*%02hhX\r\n", bufffer, crc); 
@@ -1187,65 +1269,3 @@ char getRC3CheckSum(char *theseChars) {
   // return the result
   return check;
 }
-
-char *itoa ( int n, int padding) {
-  int neg = 0;
-  if( n < 0 ) {
-    neg = 1;
-    n = n * -1;
-  }
-    char s[32];
-    static char rv[32];
-    int i = 0, j,k;
-// pop one decimal value at a time starting
-// with the least significant
-    while (n > 0) {
-        s[i++] = '0' + n%10;
-        n /= 10;
-    }
-// digits will be in reverse order
-  int ss = ((padding - i) > 0 ) ? padding - i : 0;
-  if( neg ) {
-    rv[0] = '-';
-  }
-  for( k = 0; k < ( ss ); k++ ) {
-    rv[neg+k] = '0';
-  }
-    for (j = 0; j < i; j++) {
-    rv[neg+ss+j] = s[i-j-1];
-  }
-    rv[neg+ss+j] = '\0';
-    return rv;
-}
- 
-char *ftoa (float f, int padding, unsigned int places) {
-// i is the integer portion
-    unsigned int i = (int)f, digits = 0;
-    static char rv[64];
-    strcpy(rv, itoa(i, padding));
-    strcat(rv, ".");
-  if( f < 0 ) {
-    f = f * -1;
-    i = i * -1;
-  }
- 
-// turn fraction into whole number
-    float r = f - (float)i;
-    i = 0;
-    while (r > 0.0f) {
-        r *= 10;
-        i += (int)r;
-        r -= (int)r;
-    // do not use a "places" greater than 8 or i
-    // could wrap around!
-    // (this is enough to capture the precision of 
-    // a float anyway)
-        if (++digits == places) break;
-        i *= 10;
-    }
-    if( i == 0 ) 
-      strcat(rv, itoa( i, places ) );
-    else
-      strcat(rv, itoa(i,0));
-    return rv;
-};
