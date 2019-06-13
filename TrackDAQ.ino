@@ -1191,38 +1191,53 @@ void populateRC3Buffer() {
 	sprintf(bufffer,
 			"RC3,"					// $RC3
 					"%02d%02d%02d.%03lu,"// [time]
-					"%i,"// [count]
-					"%+01.2f,"// [xacc]
-					"%+01.2f,"// [yacc]
-					"%+01.2f,"// [zacc]
-					"%+01.2f,"// [gyrox]
-					"%+01.2f,"// [gyroy]
-					"%+01.2f,"// [gyroz]
-					"%05.0f,"// rpm
-					"%i,"// front brake
-					"%03.2f,"// front brake pressure
-					"%03.2f,"// TPS
-					"%03.2f,"// Front Suspension
-					"%03.0f,"// Rear Suspension
-					"%03.0f,"// Front Wheel RPM
-					"%03.2f,"// Rear Wheel RPM
-					"0,"// Gear
-					"0,"// [a8]
-					"0,"// [a9]
-					"0,"// [a10]
-					"0,"// [a11]
-					"0,"// [a12]
-					"%01.2f,"// Roll
-					"%01.2f,"// Pitch
-					"%01.2f",// Yaw
-			gps.time.hour(), gps.time.minute(), gps.time.second(),
-			(gps.time.centisecond() * 10) + gps.time.age(), rc3Counter,
-			accelerometers.ax, accelerometers.ay, accelerometers.az, gyros.gx,
-			gyros.gy, gyros.gz, bike.getEngineSpeed(),
-			(bike.getFBrakeSwitch()) ? 1 : 0, bike.getTps(),
-			bike.getFSuspension(), bike.getRSuspension(), bike.getFWheelSpeed(),
-			bike.getRWheelSpeed(), bike.getGearPercent(), quaternions.roll,
-			quaternions.pitch, quaternions.yaw);
+					"%i,"				// [count]
+					"%+01.2f,"			// [xacc]
+					"%+01.2f,"			// [yacc]
+					"%+01.2f,"			// [zacc]
+					"%+01.2f,"			// [gyrox]
+					"%+01.2f,"			// [gyroy]
+					"%+01.2f,"			// [gyroz]
+					"%05.0f,"			// rpm [d1]
+					"%i,"				// front brake [d2]
+					"%03.2f,"			// front brake pressure [a1]
+					"%03.2f,"			// TPS [a2]
+					"%03.2f,"			// Front Suspension [a3]
+					"%03.0f,"			// Rear Suspension [a4]
+					"%03.0f,"			// Front Wheel RPM [a5]
+					"%03.2f,"			// Rear Wheel RPM [a6]
+					"%d,"				// Gear Number [a7]
+					"%d,"				// Gear Raw [a8]
+					"%d,"				// TPS Raw [a9]
+					"0,"				// [a10]
+					"0,"				// [a11]
+					"0,"				// [a12]
+					"%01.2f,"			// Roll [a13]
+					"%01.2f,"			// Pitch [a14]
+					"%01.2f",			// Yaw [a15]
+			gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond() * 10) + gps.time.age(),   // [time]
+			rc3Counter,							// [count]
+			accelerometers.ax,					// [xacc]
+			accelerometers.ay,					// [yacc]
+			accelerometers.az, 					// [zacc]
+			gyros.gx,							// [gyrox]
+			gyros.gy,							// [gyroy]
+			gyros.gz, 							// [gyroz]
+			bike.getEngineSpeed(),				// rpm [d1]
+			(bike.getFBrakeSwitch()) ? 1 : 0, 	// front brake [d2]
+			bike.getFBrakePressure(),			// front brake pressure [a1]
+			bike.getTps(),						// TPS [a2]
+			bike.getFSuspension(),				// Front Suspension [a3]
+			bike.getRSuspension(), 				// Rear Suspension [a4]
+			bike.getFWheelSpeed(),				// Front Wheel RPM [a5]
+			bike.getRWheelSpeed(), 				// Rear Wheel RPM [a6]
+			bike.getGearNumber(), 				// Gear Number [a7]
+			bike.getGearRaw(),					// Gear Raw [a8]
+			bike.getTpsRaw(),					// TPS Raw [a9]
+			quaternions.roll,					// Roll [a13]
+			quaternions.pitch, 					// Pitch [a14]
+			quaternions.yaw						// Yaw [a15]
+			);
 
 	char crc = getRC3CheckSum(bufffer);
 	sprintf(rc3Buffer, "$%s*%02hhX\r\n", bufffer, crc);

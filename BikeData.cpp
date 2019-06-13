@@ -372,7 +372,8 @@ struct QuaternionData BikeData::getQuaternion(void) {
 }
 
 float BikeData::getTps(void) {
-	return BikeData::tps / BikeData::maxADC;
+	uint16_t value = map( BikeData::tps, 775, 3130, 0, 4096 );
+	return value / BikeData::maxADC;
 }
 uint16_t BikeData::getTpsRaw(void) {
 	return BikeData::tps;
@@ -476,10 +477,23 @@ float BikeData::getEngineSpeed(void) {
 	return BikeData::engineSpeed;
 }
 void BikeData::setEngineSpeed(float value) {
+	bool setValue = false;
 	if (BikeData::engineSpeed != value) {
-		BikeData::engineSpeed = value;
-		BikeData::dirtyFields.engineSpeed = true;
-		BikeData::dirtyFields.dirty = true;
+		if( value < BikeData::engineSpeed ) {
+			if ( BikeData::engineSpeed - value < 5000 ) {
+				setValue = true;
+			}
+		}
+		else {
+			if ( value - BikeData::engineSpeed < 5000 ) {
+				setValue = true;
+			}
+		}
+		if( setValue ) {
+			BikeData::engineSpeed = value;
+			BikeData::dirtyFields.engineSpeed = true;
+			BikeData::dirtyFields.dirty = true;
+		}
 	}
 }
 
