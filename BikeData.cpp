@@ -389,9 +389,25 @@ float BikeData::getGearPercent(void) {
 }
 
 int BikeData::getGearNumber(void) {
-	if (BikeData::getNeutralSwitch())
+	int value = BikeData::getGearRaw();
+
+	if( value > 3500 )
 		return 0;
-	return BikeData::getGearRaw();
+	if( value > 2700 && value < 2900 )
+		return 1;
+	if( value > 2300 && value < 2500 )
+		return 2;
+	if( value > 1900 && value < 2100 )
+		return 3;
+	if( value > 1550 && value < 1750 )
+		return 4;
+	if( value > 1100 && value < 1300 )
+		return 5;
+	if( value > 700 && value < 900 )
+		return 6;
+
+	return -1;
+
 }
 
 uint16_t BikeData::getGearRaw(void) {

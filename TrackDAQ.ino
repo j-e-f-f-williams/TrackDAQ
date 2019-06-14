@@ -615,7 +615,7 @@ void dma2_isr(void) {
 }
 
 void digitalPinISR0(void) {
-	bike.setFBrakeSwitch((digitalReadFast( DIGITAL_FBRAKE_PIN) == HIGH));
+	bike.setFBrakeSwitch(!(digitalReadFast( DIGITAL_FBRAKE_PIN) == HIGH));
 }
 
 void digitalPinISR1(void) {
@@ -647,7 +647,9 @@ void refreshDisplay() {
 	Serial.print("Logging Enabled:\t");
 	Serial.print((loggingEnabled) ? "Yes" : "No");
 	Serial.print("\tRTC Set:\t\t");
-	Serial.println((rtcSet) ? "Yes" : "No");
+	Serial.print((rtcSet) ? "Yes" : "No");
+	Serial.print("\tVersion:\t");
+	Serial.println( _VERSION );
 
 	Serial.print("\nGPS Logging:\t\t");
 	Serial.print((fileGPS) ? "True" : "False");
