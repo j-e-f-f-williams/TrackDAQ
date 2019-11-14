@@ -8,11 +8,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
-#include "TinyGPS++.h"
 
+#include "TinyGPS++.h"
+#include "SdFat.h"
+
+#include "TrackDAQ.h"
 #include "BikeData.h"
 
 extern TinyGPSPlus gps;
+extern File fileRPM;
+extern bool fileLogRPM;
 
 namespace TrackDAQ {
 
@@ -34,6 +39,9 @@ char CheckSum::calculate(void) {
 
 BikeData::BikeData() {
 	BikeData::resetDirty(false);
+	for( int i = 0; i < NUM_ENGINE_SPEED; i++ ) {
+		BikeData::engineSpeeds[i] = 0.0;
+	}
 }
 
 BikeData::~BikeData() {
@@ -364,6 +372,17 @@ void BikeData::setQuaternion(float yaw, float pitch, float roll) {
 		BikeData::imu.quaternion.roll = roll;
 		BikeData::dirtyFields.imu.quaternion = true;
 		BikeData::dirtyFields.dirty = true;
+		if( BikeData::hasPitchRollStart() ) {
+			if( ( BikeData::startPitch < 0 && pitch < 0 ) || ( BikeData::startPitch > 0 && pitch >= 0 ) )
+				BikeData::imu.quaternion.pitch = pitch - BikeData::startPitch;
+			else if( ( BikeData::startPitch > 0 && pitch < 0 ) || ( BikeData::startPitch < 0 && pitch >= 0 ) )
+				BikeData::imu.quaternion.pitch = pitch + BikeData::startPitch;
+
+			if( ( BikeData::startRoll < 0 && roll < 0 ) || ( BikeData::startRoll > 0 && roll >= 0 ) )
+				BikeData::imu.quaternion.roll = roll - BikeData::startRoll;
+			else if( ( BikeData::startRoll > 0 && roll < 0 ) || ( BikeData::startRoll < 0 && roll >= 0 ) )
+				BikeData::imu.quaternion.roll = roll + BikeData::startRoll;
+		}
 	}
 }
 
@@ -371,8 +390,26 @@ struct QuaternionData BikeData::getQuaternion(void) {
 	return BikeData::imu.quaternion;
 }
 
+bool BikeData::hasPitchRollStart( ) {
+	 return BikeData::startPitchRollSet;
+}
+
+void BikeData::setPitchRollStart( float pitch, float roll) {
+	BikeData::startPitch = pitch;
+	BikeData::startRoll = roll;
+	BikeData::startPitchRollSet = true;
+}
+
+float BikeData::getRollStart( ) {
+	return BikeData::startRoll;
+}
+
+float BikeData::getPitchStart( ) {
+	return BikeData::startPitch;
+}
+
 float BikeData::getTps(void) {
-	uint16_t value = map( BikeData::tps, 775, 3130, 0, 4096 );
+	uint16_t value = map( BikeData::tps, 765, 3095, 0, 4096 );
 	return value / BikeData::maxADC;
 }
 uint16_t BikeData::getTpsRaw(void) {
@@ -388,22 +425,26 @@ float BikeData::getGearPercent(void) {
 	return BikeData::gear / BikeData::maxADC;
 }
 
-int BikeData::getGearNumber(void) {
-	int value = BikeData::getGearRaw();
+int BikeData::getGearNumber( void ) {
+	return getGearNumber( BikeData::getGearRaw() );
+}
 
-	if( value > 3500 )
+int BikeData::getGearNumber( int value ) {
+
+
+	if( value > 3200 )
 		return 0;
-	if( value > 2700 && value < 2900 )
+	if( value > 2700 && value < 3000 )
 		return 1;
-	if( value > 2300 && value < 2500 )
+	if( value > 2300 && value < 2600 )
 		return 2;
 	if( value > 1900 && value < 2100 )
 		return 3;
-	if( value > 1550 && value < 1750 )
+	if( value > 1500 && value < 1800 )
 		return 4;
-	if( value > 1100 && value < 1300 )
+	if( value > 1100 && value < 1400 )
 		return 5;
-	if( value > 700 && value < 900 )
+	if( value > 650 && value < 950 )
 		return 6;
 
 	return -1;
@@ -415,6 +456,18 @@ uint16_t BikeData::getGearRaw(void) {
 }
 void BikeData::setGear(uint16_t value) {
 	if (BikeData::gear != value) {
+		int existingGear = getGearNumber( BikeData::gear );
+		int newGear = getGearNumber( value );
+		if( newGear == -1 )
+			return;
+		if( newGear == 0 && (existingGear != 1 ) )
+			return;
+
+		if( newGear == 0 )
+			setNeutralSwitch( true );
+		else
+			setNeutralSwitch( false );
+
 		BikeData::gear = value;
 		BikeData::dirtyFields.gear = true;
 	}
@@ -492,25 +545,79 @@ void BikeData::setRWheelSpeed(float value) {
 float BikeData::getEngineSpeed(void) {
 	return BikeData::engineSpeed;
 }
+
+String lastType = "IN";
+float lastValue = 0.0;
+void BikeData::logRPM( String type, float value ) {
+	if( !setRPMHeader ) {
+		fileRPM.print( "type" );
+		fileRPM.print(",");
+		fileRPM.print("value");
+		fileRPM.print(",");
+		fileRPM.print("value delta");
+		fileRPM.print(",");
+		for( int i = 0; i < NUM_ENGINE_SPEED; i++ ) {
+			fileRPM.print( "engineSpeeds" );
+			fileRPM.print( i );
+			fileRPM.print(",");
+		}
+		fileRPM.print( "engineSpeedsTotal" );
+		fileRPM.print(",");
+		fileRPM.println( "engineSpeed" );
+
+		setRPMHeader = true;
+	}
+
+	fileRPM.print( type );
+	fileRPM.print(",");
+	fileRPM.print(value);
+	fileRPM.print(",");
+	if( type == "IN" ) {
+		fileRPM.print(value - lastValue);
+		fileRPM.print(",");
+		lastValue = value;
+	}
+	else {
+		fileRPM.print(0.0);
+		fileRPM.print(",");
+	}
+
+	for( int i = 0; i < NUM_ENGINE_SPEED; i++ ) {
+		fileRPM.print( BikeData::engineSpeeds[i] );
+		fileRPM.print(",");
+	}
+	fileRPM.print( BikeData::engineSpeedsTotal );
+	fileRPM.print(",");
+	fileRPM.println( BikeData::engineSpeed );
+}
+
 void BikeData::setEngineSpeed(float value) {
-	bool setValue = false;
-	if (BikeData::engineSpeed != value) {
-		if( value < BikeData::engineSpeed ) {
-			if ( BikeData::engineSpeed - value < 5000 ) {
-				setValue = true;
-			}
-		}
-		else {
-			if ( value - BikeData::engineSpeed < 5000 ) {
-				setValue = true;
-			}
-		}
-		if( setValue ) {
-			BikeData::engineSpeed = value;
-			BikeData::dirtyFields.engineSpeed = true;
-			BikeData::dirtyFields.dirty = true;
+	if( fileLogRPM && fileRPM )
+		logRPM( "IN", value );
+
+	if( value == 0.0 ) {
+		BikeData::engineSpeed = 0.0;
+		engineSpeedsTotal = 0.0;
+		for( int i = 0; i < NUM_ENGINE_SPEED; i++ ) {
+			BikeData::engineSpeeds[i] = 0.0;
 		}
 	}
+	else if (value < MAX_RPM ) {
+		float diff = BikeData::engineSpeed - value;
+		if( diff > (-1 * MAX_RPM_DELTA) && diff < MAX_RPM_DELTA ) {
+			float oldValue = BikeData::engineSpeeds[ engineSpeedsCount ];
+			BikeData::engineSpeeds[ engineSpeedsCount ] = value;
+			BikeData::engineSpeedsTotal = BikeData::engineSpeedsTotal - oldValue + value;
+			BikeData::engineSpeed = engineSpeedsTotal / NUM_ENGINE_SPEED;
+			BikeData::dirtyFields.engineSpeed = true;
+			BikeData::dirtyFields.dirty = true;
+			engineSpeedsCount ++;
+			if( engineSpeedsCount == NUM_ENGINE_SPEED )
+				engineSpeedsCount = 0;
+		}
+	}
+	if( fileLogRPM && fileRPM )
+		logRPM( "OUT", value );
 }
 
 bool BikeData::getFBrakeSwitch(void) {

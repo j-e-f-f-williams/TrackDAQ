@@ -1,3 +1,4 @@
+#include "TrackDAQ.h"
 #include <stdint.h>
 /*
  * BikeData.h
@@ -13,7 +14,12 @@
 #define	BOOT_VERSION	1.0
 #define SERIAL_NUMBER	000001
 
-#define MAX_VOLTAGE		5
+#define MAX_VOLTAGE			5
+
+#define NUM_ENGINE_SPEED	10
+#define MAX_RPM				18000
+#define MAX_RPM_DELTA		2000
+
 
 /*
  * ADC0:
@@ -114,7 +120,11 @@ public:
   size_t encodeLoggerDetails( char ** );
 
  
-	void setQuaternion( float, float, float );
+    void setPitchRollStart( float, float );
+    bool hasPitchRollStart( );
+    float getRollStart( );
+    float getPitchStart( );
+    void setQuaternion( float, float, float );
 	struct QuaternionData getQuaternion( void );
 	void setAccelerometer( float, float, float );
 	struct AccelerometerData getAccelerometer( void );
@@ -129,6 +139,7 @@ public:
 	uint16_t getTpsRaw( void );
 	void setTps( uint16_t );
 	int getGearNumber( void );
+	int getGearNumber( int );
 	float getGearPercent( void );
 	uint16_t getGearRaw( void );
 	void setGear( uint16_t );
@@ -166,9 +177,15 @@ private:
 	volatile uint16_t fBrakePressure = 0;
 	volatile uint16_t o2Sensor = 0;
 
-	volatile float fWheelSpeed = 0.0;
-	volatile float rWheelSpeed = 0.0;
-	volatile float engineSpeed = 0.0;
+	float fWheelSpeed = 0.0;
+	float rWheelSpeed = 0.0;
+	float engineSpeed = 0.0;
+	float engineSpeeds[ NUM_ENGINE_SPEED ];
+	double engineSpeedsTotal = 0.0;
+	int engineSpeedsCount = 0;
+	bool startPitchRollSet = false;
+	float startPitch = 0;
+	float startRoll = 0;
 
 	volatile bool fBrakeSwitch = false;
 	volatile bool neutralSwitch = false;
@@ -189,6 +206,8 @@ private:
 	void encodeGPSSpeed( FILE * );
 	void encodeGPSCourse( FILE * );
 	void encodeGPSAltitude( FILE * );
+	bool setRPMHeader = false;
+	void logRPM( String, float );
 };
 
 } /* namespace TrackDAQ */

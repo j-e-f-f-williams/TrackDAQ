@@ -1,23 +1,27 @@
+#include "TrackDAQ.h"
+
 #include "Arduino.h"
 #include "DMAChannel.h"
 #include "ADC.h"
 #include "FreqMeasureMulti.h"
+#ifdef EM7180_LIB
 #include "EM7180_Master.h"
+#endif
 #include "i2c_t3.h"
 #include "TinyGPS++.h"
 #include "TimeLib.h"
 #include "SdFat.h"
+#include <WS2812Serial.h>
 
-//TODO: investigate what happens when logging switch is triggered before GPS is locked
-
-const float _VERSION = 0.9;
+const float _VERSION = 1.70;
 
 #if defined(USB_MTPDISK)
 #include "MTP.h"
 #endif
 #include "BikeData.h"
 
-#define NOSTOP I2C_NOSTOP
+
+
 /*  The PINS list includes pins that I can use for future data logging
  *  Future pins were tested and confirmed to work but not needed for current project
  PIN      Signal Type     Purpose           PCB Location
@@ -29,7 +33,7 @@ const float _VERSION = 0.9;
  5       Freq            F Wheel RPM       DB25 - 5
  6       Freq            R Wheel RPM       DB25 - 3
  7       Serial3 RX      ------------      N/A
- 8       Serial3 TX      ------------      N/A
+ 8       LED/Digial      Enable LED        DB9 - 8
  9       Serial2 RX      Data Out          DB9 - 7
  10      Serial2 TX      Data Out          DB9 - 2
  15/A1   Analog          Future            N/A
@@ -45,7 +49,6 @@ const float _VERSION = 0.9;
  27      Digital         Future            N/A
  28      Digital         Future            N/A
  29      Enable/Digital  Enable Logging    DB9 - 3
- 30      LED/Digial      Enable LED        DB9 - 8
  33/A14  Analog          Rear Suspension   DB25 - 22
  34/A15  Analog          Gear Indicator    DB25 - 9
  35/A16  Analog          Front Suspension  DB25 - 23
@@ -55,7 +58,7 @@ const float _VERSION = 0.9;
  */
 
 enum outputTypeSet {
-	NONE, GPS, GPS_RC3, BINARY
+	NONE, GPS, GPS_RC3, RC3_ONLY, BINARY
 };
 static const enum outputTypeSet outputType = GPS_RC3;
 static const bool displayData = true;
@@ -63,27 +66,27 @@ static const bool fileLogGPS = false;
 static const bool fileLogVBO = true;
 static const bool fileLogCSV = true;
 static const bool fileLogBIN = false;
+bool fileLogRPM = false;
 
-#define RPM_ENGINE_PIN     21  // Engine RPM
-#define RPM_FWHEEL_PIN     5 // Front Wheel RPM
-#define RPM_RWHEEL_PIN     6 // Rear Wheel RPM
+static const bool enableFrontWheel = false;
+static const bool enableRearWheel = false;
+static const bool enableNeutral = false;
 
-#define DIGITAL_FBRAKE_PIN    24  // Front Brake Switch
-#define DIGITAL_NEUTRAL_PIN    25  // Neutral Switch
+const int numled = 1;
+byte drawingMemory[numled*3];         //  3 bytes per LED
+DMAMEM byte displayMemory[numled*12]; // 12 bytes per LED
+WS2812Serial leds(numled, displayMemory, drawingMemory, ENABLE_LED, WS2812_GRB);
+int currentRGBLED = 0;
 
-#define ENABLE_PIN      29
-#define INTERNAL_LED    13
-#define ENABLE_LED      30
 
-#define BUF_SIZE 4
-
+#ifdef EM7180_LIB
 static const uint8_t MAG_RATE = 100;  // Hz
 static const uint16_t ACCEL_RATE = 200;  // Hz
 static const uint16_t GYRO_RATE = 200;  // Hz
 static const uint8_t BARO_RATE = 50;   // Hz
-static const uint8_t Q_RATE_DIVISOR = 2;    // 1/3 gyro rate
-EM7180_Master em7180 = EM7180_Master(MAG_RATE, ACCEL_RATE, GYRO_RATE, BARO_RATE,
-		Q_RATE_DIVISOR);
+static const uint8_t Q_RATE_DIVISOR = 1;    // 1/3 gyro rate
+EM7180_Master em7180 = EM7180_Master(MAG_RATE, ACCEL_RATE, GYRO_RATE, BARO_RATE, Q_RATE_DIVISOR);
+#endif
 
 #if defined(USB_MTPDISK)
 MTPStorage_SD storage;
@@ -97,6 +100,7 @@ File fileGPS;
 File fileBIN;
 File fileVBO;
 File fileCSV;
+File fileRPM;
 
 ADC *adc = new ADC(); // adc object
 
@@ -108,10 +112,20 @@ DMAChannel* dma3 = new DMAChannel(false);
 FreqMeasureMulti freq0;   // Engine RPM
 FreqMeasureMulti freq1;   // Front Wheel RPM
 FreqMeasureMulti freq2;   // Rear Wheel RPM
+bool engineRPMSet = false;
+bool frontRPMSet = false;
+bool rearRPMSet = false;
+unsigned long currentRPMTime;
+unsigned long lastRPMTime = millis();
+long rpmCounter = 0;
+
 
 // NOTE: number of DMA must be multiple of 2
 //ChannelsCfg order must be {CH1, CH2, CH3, CH0 }, adcbuffer output will be CH0, CH1, CH2, CH3
 //Order must be {Second . . . . . . . . First} no matter the number of channels used.
+// forum post about DMA ADC reading : https://forum.pjrc.com/threads/35101-Using-two-ADCs-to-sample-8-signals
+// hex comes from table on page 274 of K66 manual (0x40 = ADC0, 0x41 = ADC1) + ID of channel page 948 (ie A14 = ADC0_SE17 = 10001 = 0x11)
+
 const uint16_t ChannelsCfg_0[] = { 0x51, 0x52, 0x4E, 0x48 }; //ADC0: CH1 A14 [F Sus]  CH2 A15[Gear]   CH3 A1 [Spare 1]    CH0 A2 [Brake]
 const uint16_t ChannelsCfg_1[] = { 0x44, 0x47, 0x46, 0x45 }; //ADC1: CH1 A16 [R Sus]  CH2 A19[O2]     CH3 A18[Spare 2]    CH0 A17[TPS]
 
@@ -125,7 +139,12 @@ unsigned long currentFlash;
 unsigned long lastFlash = millis();
 long loopCounter = 0;
 
-static const unsigned long BIN_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
+static const unsigned long IMU_INTERVAL = 2; // in ms.  5 = 200hz  10 = 100hz
+unsigned long currentIMUTime;
+unsigned long lastIMUTime = millis();
+int itemsIMUPerSecond = 0;
+
+static const unsigned long BIN_INTERVAL = 10; // in ms.  5 = 200hz  10 = 100hz
 unsigned long currentBINSendTime;
 unsigned long lastBINSendTime = millis();
 
@@ -137,11 +156,11 @@ char vboBuffer[500];
 char csvBuffer[500];
 int rc3Counter = 0;
 
-static const unsigned long VBO_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
+static const unsigned long VBO_INTERVAL = 10; // in ms.  5 = 200hz  10 = 100hz
 unsigned long currentVBOSendTime;
 unsigned long lastVBOSendTime = millis();
 
-static const unsigned long CSV_INTERVAL = 9; // in ms.  5 = 200hz  10 = 100hz
+static const unsigned long CSV_INTERVAL = 10; // in ms.  5 = 200hz  10 = 100hz
 unsigned long currentCSVSendTime;
 unsigned long lastCSVSendTime = millis();
 
@@ -149,11 +168,11 @@ static const unsigned long DISPLAY_INTERVAL = 1000; // in ms.  1/s
 unsigned long currentDisplayTime;
 unsigned long lastDisplayTime = millis();
 
-int itemsGPSPerSecond = 0;
-int itemsBINPerSecond = 0;
-int itemsRC3PerSecond = 0;
-int itemsVBOPerSecond = 0;
-int itemsCSVPerSecond = 0;
+static int itemsGPSPerSecond = 0;
+static int itemsBINPerSecond = 0;
+static int itemsRC3PerSecond = 0;
+static int itemsVBOPerSecond = 0;
+static int itemsCSVPerSecond = 0;
 
 bool rtcSet = false;
 int rtcCount = 0;
@@ -168,10 +187,17 @@ void setup() {
 	Serial2.begin(115200);
 
 	Serial.println("Setup - Start");
+	if( RGB_LED ) {
+		leds.begin();
+		setLEDColour( LED_BLUE );
+	}
+	else if( !RGB_LED ){
+		pinMode( ENABLE_LED, OUTPUT);
+		digitalWrite( ENABLE_LED, HIGH);
+	}
+
 	pinMode( INTERNAL_LED, OUTPUT);
-	pinMode( ENABLE_LED, OUTPUT);
 	digitalWrite( INTERNAL_LED, HIGH);
-	digitalWrite( ENABLE_LED, HIGH);
 
 	if (displayData)
 		delay(10000);
@@ -193,8 +219,10 @@ void setup() {
 	pinMode( RPM_FWHEEL_PIN, INPUT_PULLUP);
 	pinMode( RPM_RWHEEL_PIN, INPUT_PULLUP);
 	freq0.begin( RPM_ENGINE_PIN);
-	freq1.begin( RPM_FWHEEL_PIN);
-	freq2.begin( RPM_RWHEEL_PIN);
+	if( enableFrontWheel )
+		freq1.begin( RPM_FWHEEL_PIN);
+	if( enableRearWheel )
+		freq2.begin( RPM_RWHEEL_PIN);
 
 	Serial.println("Setup - ADC");
 	setup_adc();
@@ -205,16 +233,28 @@ void setup() {
 	Serial.println("Setup - IMU - scan");
 	I2Cscan();
 	Serial.println("Setup - IMU - configure");
+#ifdef EM7180_LIB
 	if (!em7180.begin()) {
 		Serial.println(em7180.getErrorString());
 	}
+#endif
+
+#ifdef EM7180
+	setupEM7180();
+#endif
+
+#ifdef BNO055
+	setupBNO();
+#endif
+
 	Serial.println("Setup - Digital Pins");
 	pinMode(DIGITAL_FBRAKE_PIN, INPUT_PULLUP);
 	pinMode(DIGITAL_NEUTRAL_PIN, INPUT_PULLUP);
 
 	Serial.println("Setup - Digital ISR");
 	attachInterrupt(DIGITAL_FBRAKE_PIN, digitalPinISR0, CHANGE);
-	attachInterrupt(DIGITAL_NEUTRAL_PIN, digitalPinISR1, CHANGE);
+	if (enableNeutral )
+		attachInterrupt(DIGITAL_NEUTRAL_PIN, digitalPinISR1, CHANGE);
 
 	Serial.println("Setup - Enable Pins");
 	pinMode( ENABLE_PIN, INPUT_PULLDOWN);
@@ -225,25 +265,39 @@ void setup() {
 
 	Serial.println("\nSetup - End");
 	digitalWrite( INTERNAL_LED, LOW);
-	digitalWrite( ENABLE_LED, LOW);
+	if( RGB_LED) {
+		setLEDColour( LED_OFF);
+	}
+	else if( !RGB_LED ){
+		digitalWrite( ENABLE_LED, LOW);
+	}
 }
 
 void loop() {
+	if( RGB_LED && rtcSet && !loggingEnabled )
+		setLEDColour( LED_LIGHT_YELLOW );
+	if( RGB_LED && !rtcSet && !loggingEnabled )
+		setLEDColour( LED_LIGHT_RED );
 	if (digitalReadFast( ENABLE_PIN)) {
 		if (!loggingEnabled) {
 			loggingEnabled = true;
-			digitalWrite( ENABLE_LED, HIGH);
+			if( RGB_LED )
+				setLEDColour( LED_LIGHT_GREEN);
+			else if( !RGB_LED )
+				digitalWrite( ENABLE_LED, HIGH);
 		}
 	}
 	if (!digitalReadFast( ENABLE_PIN)) {
 		if (loggingEnabled) {
 			loggingEnabled = false;
-			digitalWrite( ENABLE_LED, LOW);
+			if( RGB_LED )
+				setLEDColour( LED_OFF);
+			else if (!RGB_LED )
+				digitalWrite( ENABLE_LED, LOW);
 		}
 	}
 	currentFlash = millis();
-	if (!loggingEnabled && gps.satellites.value() > 3
-			&& currentFlash - lastFlash >= 500) {
+	if (!RGB_LED && !loggingEnabled && gps.satellites.value() > 3 && currentFlash - lastFlash >= 500) {
 		lastFlash = currentFlash;
 		if (digitalReadFast( ENABLE_LED))
 			digitalWrite( ENABLE_LED, LOW);
@@ -257,7 +311,12 @@ void loop() {
   }
 #endif
 
-	if (fileLogGPS && loggingEnabled && !fileGPS && rtcSet) {
+    if( fileLogRPM && loggingEnabled && !fileRPM ) {
+		String fileName = getFileName("rpm");
+		Serial.println("Creating file " + fileName);
+		fileRPM.open(fileName.c_str(), O_RDWR | O_CREAT);
+    }
+    if (fileLogGPS && loggingEnabled && !fileGPS && rtcSet) {
 		String fileName = getFileName("gps");
 		Serial.println("Creating file " + fileName);
 		fileGPS.open(fileName.c_str(), O_RDWR | O_CREAT);
@@ -295,6 +354,10 @@ void loop() {
 		addCSVHeader();
 	}
 
+	if (fileLogRPM && !loggingEnabled && fileRPM) {
+		fileRPM.flush();
+		fileRPM.close();
+	}
 	if (fileLogGPS && !loggingEnabled && fileGPS) {
 		fileGPS.flush();
 		fileGPS.close();
@@ -314,74 +377,117 @@ void loop() {
 
 	if (freq0.available()) {
 		bike.setEngineSpeed(30.0 * freq0.countToFrequency(freq0.read()));
+		rpmCounter ++;
+		engineRPMSet = true;
 	}
-	if (freq1.available()) {
+	if (enableFrontWheel && freq1.available()) {
 		bike.setFWheelSpeed(freq1.countToFrequency(freq1.read()));
+		frontRPMSet = true;
 	}
-	if (freq2.available()) {
+	if (enableRearWheel && freq2.available()) {
 		bike.setRWheelSpeed(freq2.countToFrequency(freq2.read()));
+		rearRPMSet = true;
 	}
 
-	em7180.checkEventStatus();
-
-	if (em7180.gotError()) {
-		Serial.print("ERROR: ");
-		Serial.println(em7180.getErrorString());
-	}
-	if (em7180.gotQuaternion()) {
-
-		float qw, qx, qy, qz;
-
-		em7180.readQuaternion(qw, qx, qy, qz);
-
-		float roll = atan2(2.0f * (qw * qx + qy * qz),
-				qw * qw - qx * qx - qy * qy + qz * qz);
-		float pitch = -asin(2.0f * (qx * qz - qw * qy));
-		float yaw = atan2(2.0f * (qx * qy + qw * qz),
-				qw * qw + qx * qx - qy * qy - qz * qz);
-
-		pitch *= 180.0f / PI;
-		yaw *= 180.0f / PI;
-		yaw += 13.8f; // Declination at Danville, California is 13 degrees 48 minutes and 47 seconds on 2014-04-04
-		if (yaw < 0)
-			yaw += 360.0f; // Ensure yaw stays between 0 and 360
-		roll *= 180.0f / PI;
-
-		bike.setQuaternion(yaw, pitch, roll);
+	currentRPMTime = millis();
+	if (currentRPMTime - lastRPMTime >= 250) {
+		lastRPMTime = currentRPMTime;
+		if(!engineRPMSet) {
+			bike.setEngineSpeed( 0.0 );
+		}
+		if(enableFrontWheel && !frontRPMSet) {
+			bike.setFWheelSpeed( 0.0 );
+		}
+		if(enableRearWheel && !rearRPMSet) {
+			bike.setRWheelSpeed( 0.0 );
+		}
+		engineRPMSet = false;
+		frontRPMSet = false;
+		rearRPMSet = false;
 	}
 
-	if (em7180.gotAccelerometer()) {
-		float ax, ay, az;
-		em7180.readAccelerometer(ax, ay, az);
-		bike.setAccelerometer(ax, ay, az);
-	}
 
-	if (em7180.gotGyrometer()) {
-		float gx, gy, gz;
-		em7180.readGyrometer(gx, gy, gz);
-		bike.setGyroscope(gx, gy, gz);
-	}
+	currentIMUTime = millis();
+	if (currentIMUTime - lastIMUTime >= IMU_INTERVAL) {
+		lastIMUTime = currentIMUTime;
 
-	if (em7180.gotMagnetometer()) {
+#ifdef BNO055
+		loopBNO();
+#endif
 
-		float mx, my, mz;
-		em7180.readMagnetometer(mx, my, mz);
-		bike.setMagnetometer(mx, my, mz);
-	}
+#ifdef EM7180
+		loopEM7180();
+#endif
 
-	if (em7180.gotBarometer()) {
-		float temperature, pressure;
 
-		em7180.readBarometer(pressure, temperature);
-		float altitude = (1.0f - powf(pressure / 1013.25f, 0.190295f))
-				* 44330.0f;
-		bike.setPressure(temperature, pressure, altitude);
+#ifdef EM7180_LIB
+		em7180.checkEventStatus();
+
+		if (em7180.gotError()) {
+			Serial.print("ERROR: ");
+			Serial.println(em7180.getErrorString());
+		}
+		if (em7180.gotQuaternion()) {
+			itemsIMUPerSecond++;
+
+			float qw, qx, qy, qz;
+
+			em7180.readQuaternion(qw, qx, qy, qz);
+
+			float roll = atan2(2.0f * (qw * qx + qy * qz),
+					qw * qw - qx * qx - qy * qy + qz * qz);
+			float pitch = -asin(2.0f * (qx * qz - qw * qy));
+			float yaw = atan2(2.0f * (qx * qy + qw * qz),
+					qw * qw + qx * qx - qy * qy - qz * qz);
+
+			pitch *= 180.0f / PI;
+			yaw *= 180.0f / PI;
+			yaw += 13.8f; // Declination at Danville, California is 13 degrees 48 minutes and 47 seconds on 2014-04-04
+			if (yaw < 0)
+				yaw += 360.0f; // Ensure yaw stays between 0 and 360
+			roll *= 180.0f / PI;
+
+			bike.setQuaternion(yaw, pitch, roll);
+			if(!bike.hasPitchRollStart() && rtcSet ) {
+				bike.setPitchRollStart( pitch, roll );
+			}
+		}
+
+		if (em7180.gotAccelerometer()) {
+			float ax, ay, az;
+			em7180.readAccelerometer(ax, ay, az);
+			bike.setAccelerometer(ax, ay, az);
+		}
+
+		if (em7180.gotGyrometer()) {
+			float gx, gy, gz;
+			em7180.readGyrometer(gx, gy, gz);
+			bike.setGyroscope(gx, gy, gz);
+		}
+
+		if (em7180.gotMagnetometer()) {
+
+			float mx, my, mz;
+			em7180.readMagnetometer(mx, my, mz);
+			bike.setMagnetometer(mx, my, mz);
+		}
+
+		if (em7180.gotBarometer()) {
+			float temperature, pressure;
+
+			em7180.readBarometer(pressure, temperature);
+			float altitude = (1.0f - powf(pressure / 1013.25f, 0.190295f)) * 44330.0f;
+			bike.setPressure(temperature, pressure, altitude);
+		}
+#endif
 	}
 
 	if (Serial1.available()) {
 		while (Serial1.available()) {
 			char c = Serial1.read();
 			gps.encode(c);
+			//Serial.write( c );
+
 			if (rtcSet) {
 				gpsLine[gpsCount] = c;
 				gpsCount++;
@@ -434,7 +540,7 @@ void loop() {
 	}
 
 	currentRC3SendTime = millis();
-	if (rtcSet && outputType == GPS_RC3
+	if (rtcSet && ( outputType == GPS_RC3 || outputType == RC3_ONLY )
 			&& currentRC3SendTime - lastRC3SendTime >= RC3_INTERVAL) {
 		lastRC3SendTime = currentRC3SendTime;
 		itemsRC3PerSecond++;
@@ -636,6 +742,37 @@ void refreshDisplay() {
 		Serial.print(minute());
 		Serial.print(":");
 		Serial.println(second());
+
+		Serial.print("\nRTC Set:\t");
+		Serial.println((rtcSet) ? "Yes" : "No");
+		Serial.print("GPS per second:\t");
+		Serial.print(itemsGPSPerSecond);
+		Serial.print("\tBIN per second:\t");
+		Serial.print(itemsBINPerSecond);
+		Serial.print("\tLOOP per second: ");
+		Serial.print(loopCounter);
+		Serial.print("\tRPM per second:\t");
+		Serial.println(rpmCounter);
+		Serial.print("RC3 per second:\t");
+		Serial.print(itemsRC3PerSecond);
+		Serial.print("\tVBO per second:\t");
+		Serial.print(itemsVBOPerSecond);
+		Serial.print("\tCSV per second:\t");
+		Serial.print(itemsCSVPerSecond);
+		Serial.print("\tIMU per second:\t");
+		Serial.println(itemsIMUPerSecond);
+
+		Serial.println();
+
+
+		itemsGPSPerSecond = 0;
+		itemsBINPerSecond = 0;
+		itemsRC3PerSecond = 0;
+		itemsVBOPerSecond = 0;
+		itemsCSVPerSecond = 0;
+		itemsIMUPerSecond = 0;
+		loopCounter = 0;
+		rpmCounter = 0;
 		return;
 	}
 	if (!loggingEnabled) {
@@ -649,7 +786,7 @@ void refreshDisplay() {
 	Serial.print("\tRTC Set:\t\t");
 	Serial.print((rtcSet) ? "Yes" : "No");
 	Serial.print("\tVersion:\t");
-	Serial.println( _VERSION );
+	Serial.println( _VERSION,3 );
 
 	Serial.print("\nGPS Logging:\t\t");
 	Serial.print((fileGPS) ? "True" : "False");
@@ -693,7 +830,7 @@ void refreshDisplay() {
 	Serial.print(bike.getRSuspensionRaw());
 	Serial.print(")");
 	Serial.print("\tO2 Sensor:\t");
-	Serial.println(bike.getO2Sensor());
+	Serial.print(bike.getO2Sensor());
 	Serial.print("(");
 	Serial.print(bike.getO2SensorRaw());
 	Serial.println(")");
@@ -724,9 +861,11 @@ void refreshDisplay() {
 
 	Serial.print("\nYaw:\t\t");
 	Serial.print(quaternions.yaw);
-	Serial.print("\tPitch:\t\t");
+	Serial.print("\tPitch:");
+	Serial.print( "(");Serial.print( bike.getPitchStart() ); Serial.print( ")\t");
 	Serial.print(quaternions.pitch);
-	Serial.print("\tRoll:\t\t");
+	Serial.print("\tRoll:");
+	Serial.print( "(");Serial.print( bike.getRollStart() ); Serial.print( ")\t");
 	Serial.println(quaternions.roll);
 	Serial.print("A-X:\t\t");
 	Serial.print(accelerometers.ax);
@@ -745,14 +884,19 @@ void refreshDisplay() {
 	Serial.print(itemsGPSPerSecond);
 	Serial.print("\tBIN per second:\t");
 	Serial.print(itemsBINPerSecond);
-	Serial.print("\tLOOP per second:\t");
-	Serial.println(loopCounter);
+	Serial.print("\tLOOP per second: ");
+	Serial.print(loopCounter);
+	Serial.print("\tRPM per second:\t");
+	Serial.println(rpmCounter);
 	Serial.print("RC3 per second:\t");
 	Serial.print(itemsRC3PerSecond);
 	Serial.print("\tVBO per second:\t");
 	Serial.print(itemsVBOPerSecond);
 	Serial.print("\tCSV per second:\t");
-	Serial.println(itemsCSVPerSecond);
+	Serial.print(itemsCSVPerSecond);
+	Serial.print("\tIMU per second:\t");
+	Serial.println(itemsIMUPerSecond);
+
 	Serial.println();
 
 	Serial.print("Date: ");
@@ -774,50 +918,13 @@ void refreshDisplay() {
 	itemsRC3PerSecond = 0;
 	itemsVBOPerSecond = 0;
 	itemsCSVPerSecond = 0;
+	itemsIMUPerSecond = 0;
 	loopCounter = 0;
+	rpmCounter = 0;
 	gpsdump();
 	if (!loggingEnabled) {
 		digitalWrite( INTERNAL_LED, LOW);
 	}
-}
-
-// simple function to scan for I2C devices on the bus
-void I2Cscan() {
-	// scan for i2c devices
-	byte error, address;
-	int nDevices;
-
-	Serial.println("Scanning...");
-
-	nDevices = 0;
-	for (address = 1; address < 127; address++) {
-		Serial.print("Scanning ");
-		Serial.println(address);
-		// The i2c_scanner uses the return value of
-		// the Write.endTransmisstion to see if
-		// a device did acknowledge to the address.
-		Wire.beginTransmission(address);
-		error = Wire.endTransmission();
-
-		if (error == 0) {
-			Serial.print("I2C device found at address 0x");
-			if (address < 16)
-				Serial.print("0");
-			Serial.print(address, HEX);
-			Serial.println("  !");
-
-			nDevices++;
-		} else if (error == 4) {
-			Serial.print("Unknow error at address 0x");
-			if (address < 16)
-				Serial.print("0");
-			Serial.println(address, HEX);
-		}
-	}
-	if (nDevices == 0)
-		Serial.println("No I2C devices found\n");
-	else
-		Serial.println("done\n");
 }
 
 void gpsdump() {
@@ -954,6 +1061,7 @@ void addCSVHeader(void) {
 				"pitch,"
 				"yaw,"
 				"tps,"
+				"tps-raw,"
 				"rpm,"
 				"neutral,"
 				"gear-count,"
@@ -1013,81 +1121,15 @@ void addVBOHeader(void) {
 		fileVBO.println("pressure-datalogger");
 		fileVBO.println("\n[avi]");
 		fileVBO.println("\n[comments]");
-		sprintf(tempStr, "Generated by TrackDAQ v%0.02f", _VERSION);
+		sprintf(tempStr, "Generated by TrackDAQ v%0.03f", _VERSION);
 		fileVBO.println(tempStr);
 
 		addTrackDetails();
 
 		fileVBO.println("\n[column names]");
-		fileVBO.println(
-				"sats lat long velocity heading height longacc latacc device-update-rate lean-angle fix-type coordinate-precision altitude-precision sats time lat long velocity heading height longacc latacc x-acceleration-datalogger y-acceleration-datalogger z-acceleration-datalogger x-rotation-datalogger y-rotation-datalogger z-rotation-datalogger device-update-rate-datalogger rpm-datalogger roll-datalogger pitch-datalogger yaw-datalogger tps-datalogger neutral-datalogger brake-switch-datalogger gear-raw-datalogger gear-num-datalogger front-brake-pressure-datalogger front-suspension-datalogger front-rpm-datalogger rear-suspension-datalogger rear-rpm-datalogger temp-datalogger pressure-datalogger");
+		fileVBO.println( "sats time lat long velocity heading height longacc latacc device-update-rate lean-angle fix-type coordinate-precision altitude-precision x-acceleration-datalogger y-acceleration-datalogger z-acceleration-datalogger x-rotation-datalogger y-rotation-datalogger z-rotation-datalogger device-update-rate-datalogger rpm-datalogger roll-datalogger pitch-datalogger yaw-datalogger tps-datalogger neutral-datalogger brake-switch-datalogger gear-raw-datalogger gear-num-datalogger front-brake-pressure-datalogger front-suspension-datalogger front-rpm-datalogger rear-suspension-datalogger rear-rpm-datalogger temp-datalogger pressure-datalogger");
 		fileVBO.println("\n[data]");
 	}
-}
-
-void addTrackDetails() {
-	char ch;
-	if (SD.exists("track.vbo")) {
-		File file = SD.open("track.vbo", FILE_READ);
-		file.seek(0);
-		 while (file.available()) {
-			 if (file.read(&ch, 1) == 1) {
-				 fileVBO.write( ch );
-			 }
-		 }
-		 file.close();
-	}
-}
-
-void populateCSVLine() {
-	struct QuaternionData quaternions = bike.getQuaternion();
-	struct AccelerometerData accelerometers = bike.getAccelerometer();
-	struct GyroscopeData gyros = bike.getGyroscope();
-	struct PressureData pressure = bike.getPressure();
-
-	sprintf(csvBuffer,
-			"%02lu,"				// satelites
-					"%02d%02d%04d,"// date
-					"%02d%02d%02d.%03lu,"// time
-					"%f,"// lat
-					"%f,"// lon
-					"%03.02f,"// speed
-					"%03.02f,"// direction
-					"%04.02f,"// altitude
-					"%03.02f,"// temp
-					"%04.02f,"// pressure
-					"%03.02f,"// accelerometer x
-					"%03.02f,"// accelerometer y
-					"%03.02f,"// accelerometer z
-					"%03.02f,"// gyro x
-					"%03.02f,"// gyro y
-					"%03.02f,"// gyro z
-					"%03.02f,"// roll
-					"%03.02f,"// pitch
-					"%03.02f,"// yaw
-					"%03.02f,"// TPS
-					"%05f,"// RPM
-					"%d,"// Neutral
-					"%d,"// Gear V
-					"%d,"// Gear Number
-					"%d,"// F Brake on/off
-					"%03.02f,"// Brake pressure
-					"%03.02f,"// F Suspension
-					"%03.02f,"// F Wheel Speed
-					"%03.02f,"// R Suspension
-					"%03.02f",// R Wheel Speed
-			gps.satellites.value(), day(), month(), year(), hour(), minute(),
-			gps.time.second(), ((gps.time.centisecond() * 10) + gps.time.age()),
-			gps.location.lat(), gps.location.lng(), gps.speed.kmph(),
-			gps.course.deg(), gps.altitude.meters(), pressure.temperature,
-			pressure.pressure, accelerometers.ax, accelerometers.ay,
-			accelerometers.az, gyros.gx, gyros.gy, gyros.gz, quaternions.roll,
-			quaternions.pitch, quaternions.yaw, bike.getTps(),
-			bike.getEngineSpeed(), (bike.getNeutralSwitch() ? 1 : 0),
-			bike.getGearRaw(), bike.getGearNumber(),
-			(bike.getFBrakeSwitch() ? 1 : 0), bike.getFBrakePressure(),
-			bike.getFSuspension(), bike.getFWheelSpeed(), bike.getRSuspension(),
-			bike.getRWheelSpeed());
 }
 
 void populateVBOLine() {
@@ -1095,6 +1137,12 @@ void populateVBOLine() {
 	struct AccelerometerData accelerometers = bike.getAccelerometer();
 	struct GyroscopeData gyros = bike.getGyroscope();
 	struct PressureData pressure = bike.getPressure();
+
+	int seconds = gps.time.second();
+	long milliSeconds = (gps.time.centisecond() * 10) + ((gps.time.age() < 10) ? 0 : gps.time.age());
+	if( milliSeconds >= 1000 ) {
+		milliSeconds = milliSeconds - (milliSeconds - 1000) -1;
+	}
 
 	sprintf(vboBuffer,
 			"%02lu "	// satellites
@@ -1136,18 +1184,15 @@ void populateVBOLine() {
 					"%f "// pressure-datalogger
 			,
 			gps.satellites.value(),		// satellites
-			hour(), minute(), gps.time.second(),
-			((gps.time.centisecond() * 10) + gps.time.age()),		// time
-			(gps.location.lat() < 0) ?
-					gps.location.lat() * -60 : gps.location.lat() * 60,	// latitude
-			(gps.location.lng() < 0) ?
-					gps.location.lng() * -60 : gps.location.lng() * 60,	// longitude
+			hour(), minute(), seconds, milliSeconds,		// time
+			(gps.location.lat() < 0) ? gps.location.lat() * -60 : gps.location.lat() * 60,	// latitude
+			(gps.location.lng() < 0) ? gps.location.lng() * -60 : gps.location.lng() * 60,	// longitude
 			gps.speed.kmph(),			// velocity kmh
 			gps.course.deg(),			// heading
 			gps.altitude.meters(),		// height
 			0.0, 						// long accel g
 			0.0, 						// lat accel g
-			int(1000.0 / VBO_INTERVAL),			// device-update-rate
+			int(1000.0 / VBO_INTERVAL),	// device-update-rate
 			quaternions.roll,			// lean-angle
 			1,							// fix-type
 			gps.hdop.hdop(), 			// coordinate-precision
@@ -1158,7 +1203,7 @@ void populateVBOLine() {
 			gyros.gx,					// x-rotation-datalogger
 			gyros.gy,					// y-rotation-datalogger
 			gyros.gz,					// z-rotation-datalogger
-			int(1000.0 / VBO_INTERVAL),			// device-update-rate-datalogger
+			int(1000.0 / VBO_INTERVAL),	// device-update-rate-datalogger
 			bike.getEngineSpeed(),		// rpm-datalogger
 			quaternions.roll,			// roll-datalogger
 			quaternions.pitch,			// pitch-datalogger
@@ -1179,6 +1224,79 @@ void populateVBOLine() {
 
 }
 
+void addTrackDetails() {
+	char ch;
+	if (SD.exists("track.vbo")) {
+		File file = SD.open("track.vbo", FILE_READ);
+		file.seek(0);
+		 while (file.available()) {
+			 if (file.read(&ch, 1) == 1) {
+				 fileVBO.write( ch );
+			 }
+		 }
+		 file.close();
+	}
+}
+
+void populateCSVLine() {
+	struct QuaternionData quaternions = bike.getQuaternion();
+	struct AccelerometerData accelerometers = bike.getAccelerometer();
+	struct GyroscopeData gyros = bike.getGyroscope();
+	struct PressureData pressure = bike.getPressure();
+
+	int seconds = gps.time.second();
+	long milliSeconds = (gps.time.centisecond() * 10) + ((gps.time.age() < 10) ? 0 : gps.time.age());
+	if( milliSeconds >= 1000 ) {
+		milliSeconds = milliSeconds - (milliSeconds - 1000) -1;
+	}
+
+
+	sprintf(csvBuffer,
+			"%02lu,"				// satelites
+					"%02d%02d%04d,"// date
+					"%02d%02d%02d.%03lu,"// time
+					"%f,"// lat
+					"%f,"// lon
+					"%03.02f,"// speed
+					"%03.02f,"// direction
+					"%04.02f,"// altitude
+					"%03.02f,"// temp
+					"%04.02f,"// pressure
+					"%03.02f,"// accelerometer x
+					"%03.02f,"// accelerometer y
+					"%03.02f,"// accelerometer z
+					"%03.02f,"// gyro x
+					"%03.02f,"// gyro y
+					"%03.02f,"// gyro z
+					"%03.02f,"// roll
+					"%03.02f,"// pitch
+					"%03.02f,"// yaw
+					"%03.02f,"// TPS
+					"%d,"// TPS-RAW
+					"%05f,"// RPM
+					"%d,"// Neutral
+					"%d,"// Gear V
+					"%d,"// Gear Number
+					"%d,"// F Brake on/off
+					"%03.02f,"// Brake pressure
+					"%03.02f,"// F Suspension
+					"%03.02f,"// F Wheel Speed
+					"%03.02f,"// R Suspension
+					"%03.02f",// R Wheel Speed
+			gps.satellites.value(), day(), month(), year(), hour(), minute(),
+			seconds, milliSeconds,
+			gps.location.lat(), gps.location.lng(), gps.speed.kmph(),
+			gps.course.deg(), gps.altitude.meters(), pressure.temperature,
+			pressure.pressure, accelerometers.ax, accelerometers.ay,
+			accelerometers.az, gyros.gx, gyros.gy, gyros.gz, quaternions.roll,
+			quaternions.pitch, quaternions.yaw, bike.getTps(),bike.getTpsRaw(),
+			bike.getEngineSpeed(), (bike.getNeutralSwitch() ? 1 : 0),
+			bike.getGearRaw(), bike.getGearNumber(),
+			(bike.getFBrakeSwitch() ? 1 : 0), bike.getFBrakePressure(),
+			bike.getFSuspension(), bike.getFWheelSpeed(), bike.getRSuspension(),
+			bike.getRWheelSpeed());
+}
+
 void populateRC3Buffer() {
 	char bufffer[200];
 	if (rc3Counter == 65535)
@@ -1189,6 +1307,12 @@ void populateRC3Buffer() {
 	struct AccelerometerData accelerometers = bike.getAccelerometer();
 	struct GyroscopeData gyros = bike.getGyroscope();
 	struct PressureData pressure = bike.getPressure();
+
+	int seconds = gps.time.second();
+	long milliSeconds = (gps.time.centisecond() * 10) + ((gps.time.age() < 10) ? 0 : gps.time.age());
+	if( milliSeconds >= 1000 ) {
+		milliSeconds = milliSeconds - (milliSeconds - 1000) -1;
+	}
 
 	sprintf(bufffer,
 			"RC3,"					// $RC3
@@ -1211,13 +1335,13 @@ void populateRC3Buffer() {
 					"%d,"				// Gear Number [a7]
 					"%d,"				// Gear Raw [a8]
 					"%d,"				// TPS Raw [a9]
-					"0,"				// [a10]
+					"%02.3f,"			// Logger Version [a10]
 					"0,"				// [a11]
 					"0,"				// [a12]
 					"%01.2f,"			// Roll [a13]
 					"%01.2f,"			// Pitch [a14]
 					"%01.2f",			// Yaw [a15]
-			gps.time.hour(), gps.time.minute(), gps.time.second(), (gps.time.centisecond() * 10) + gps.time.age(),   // [time]
+			gps.time.hour(), gps.time.minute(), seconds, milliSeconds,   // [time]
 			rc3Counter,							// [count]
 			accelerometers.ax,					// [xacc]
 			accelerometers.ay,					// [yacc]
@@ -1236,6 +1360,7 @@ void populateRC3Buffer() {
 			bike.getGearNumber(), 				// Gear Number [a7]
 			bike.getGearRaw(),					// Gear Raw [a8]
 			bike.getTpsRaw(),					// TPS Raw [a9]
+			_VERSION,							// Version [a10]
 			quaternions.roll,					// Roll [a13]
 			quaternions.pitch, 					// Pitch [a14]
 			quaternions.yaw						// Yaw [a15]
@@ -1256,4 +1381,13 @@ char getRC3CheckSum(char *theseChars) {
 	}
 	// return the result
 	return check;
+}
+
+void setLEDColour(int colour) {
+	if( currentRGBLED != colour ) {
+		leds.setPixel(0, colour);
+		leds.show();
+		currentRGBLED = colour;
+	}
+
 }
